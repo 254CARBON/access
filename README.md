@@ -1,4 +1,4 @@
-````markdown name=README.md
+
 # 254Carbon Access Layer (`254carbon-access`)
 
 > Unified repository for the platform “edge” and cross-cutting access services:
@@ -635,5 +635,4 @@ GET /health
 
 > “The access layer should feel invisible: fast, predictable, and boring—in the best way.”
 
----
-````
+
