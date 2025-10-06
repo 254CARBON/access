@@ -1,0 +1,84 @@
+## Ingress for 254Carbon Access Layer
+##
+## This manifest exposes the services externally via ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: access-layer-ingress
+  namespace: 254carbon-access
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - api.254carbon.local
+    - stream.254carbon.local
+    secretName: access-layer-tls
+  rules:
+  - host: api.254carbon.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: gateway-service
+            port:
+              number: 8000
+  - host: stream.254carbon.local
+    http:
+      paths:
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: streaming-service
+            port:
+              number: 8001
+      - path: /sse
+        pathType: Prefix
+        backend:
+          service:
+            name: streaming-service
+            port:
+              number: 8001
+---
+## Internal Ingress for service-to-service communication
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: access-layer-internal-ingress
+  namespace: 254carbon-access
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+  - host: internal.254carbon.local
+    http:
+      paths:
+      - path: /auth
+        pathType: Prefix
+        backend:
+          service:
+            name: auth-service
+            port:
+              number: 8010
+      - path: /entitlements
+        pathType: Prefix
+        backend:
+          service:
+            name: entitlements-service
+            port:
+              number: 8011
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: metrics-service
+            port:
+              number: 8012

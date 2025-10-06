@@ -1,0 +1,20 @@
+## Service Manifest: Metrics
+## Collects and aggregates metrics for all Access services.
+service_name: metrics
+domain: access
+runtime: python
+language_version: "3.12"
+api_contracts:
+  - metrics-core@1.0.0
+events_in:
+  - metrics.request.count.v1
+  - metrics.connection.count.v1
+events_out: []
+dependencies:
+  internal: []
+  external: []
+maturity: stable
+sla:
+  p95_latency_ms: 50
+  availability: "99.0%"
+owner: platform

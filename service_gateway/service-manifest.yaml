@@ -1,0 +1,20 @@
+## Service Manifest: Gateway
+## Front door for Access Layer: authN, authZ, rate limiting, caching.
+service_name: gateway
+domain: access
+runtime: python
+language_version: "3.12"
+api_contracts:
+  - gateway-core@1.0.0
+events_in:
+  - pricing.curve.updates.v1
+events_out:
+  - metrics.request.count.v1
+dependencies:
+  internal: [auth, entitlements, metrics]
+  external: [redis, clickhouse]
+maturity: stable
+sla:
+  p95_latency_ms: 150
+  availability: "99.0%"
+owner: platform

@@ -1,0 +1,20 @@
+## Service Manifest: Entitlements
+## Rule evaluation service that decides allow/deny for resource actions.
+service_name: entitlements
+domain: access
+runtime: python
+language_version: "3.12"
+api_contracts:
+  - entitlements-core@1.0.0
+events_in:
+  - auth.token.validated.v1
+events_out:
+  - entitlements.decision.made.v1
+dependencies:
+  internal: []
+  external: [redis, postgresql]
+maturity: stable
+sla:
+  p95_latency_ms: 25
+  availability: "99.5%"
+owner: platform

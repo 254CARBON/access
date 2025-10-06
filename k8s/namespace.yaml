@@ -1,0 +1,10 @@
+## Kubernetes Namespace for 254Carbon Access Layer resources
+## Apply this first to establish the logical boundary for all services.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: 254carbon-access
+  labels:
+    name: 254carbon-access
+    app.kubernetes.io/name: 254carbon-access
+    app.kubernetes.io/part-of: 254carbon

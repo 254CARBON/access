@@ -1,0 +1,28 @@
+# OpenAPI specification for the Streaming Service
+# Intended for quick local tooling and contract checks.
+info:
+  description: API specification for the streaming service
+  title: Streaming Service API
+  version: 1.0.0
+openapi: 3.0.3
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                properties:
+                  service:
+                    type: string
+                  status:
+                    type: string
+                  version:
+                    type: string
+                type: object
+          description: Service is healthy
+      summary: Health check
+servers:
+- description: Development server
+  url: http://localhost:8001

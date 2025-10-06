@@ -1,0 +1,19 @@
+## Service Manifest: Auth
+## Describes runtime, dependencies, contracts, and SLO targets used by tooling.
+service_name: auth
+domain: access
+runtime: python
+language_version: "3.12"
+api_contracts:
+  - auth-core@1.0.0
+events_in: []
+events_out:
+  - auth.token.validated.v1
+dependencies:
+  internal: []
+  external: [keycloak]
+maturity: stable
+sla:
+  p95_latency_ms: 15
+  availability: "99.5%"
+owner: platform

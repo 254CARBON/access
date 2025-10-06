@@ -1,0 +1,19 @@
+## Shared configuration for Access Layer services (ConfigMap)
+## Deployed into the 254carbon-access namespace and consumed via env vars.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: access-config
+  namespace: 254carbon-access
+data:
+  ACCESS_ENV: "production"
+  ACCESS_LOG_LEVEL: "info"
+  ACCESS_REDIS_URL: "redis://redis-service:6379/0"
+  ACCESS_POSTGRES_DSN: "postgres://access:access@postgres-service:5432/access"
+  ACCESS_KAFKA_BOOTSTRAP: "kafka-service:9092"
+  ACCESS_JWKS_URL: "http://keycloak-service:8080/realms/254carbon/protocol/openid-connect/certs"
+  ACCESS_AUTH_SERVICE_URL: "http://auth-service:8010"
+  ACCESS_ENTITLEMENTS_SERVICE_URL: "http://entitlements-service:8011"
+  ACCESS_METRICS_SERVICE_URL: "http://metrics-service:8012"
+  ACCESS_ENABLE_TRACING: "true"
+  ACCESS_OTEL_EXPORTER: "http://otel-collector:4318"

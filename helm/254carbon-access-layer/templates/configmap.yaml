@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "254carbon-access-layer.fullname" . }}-config
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "254carbon-access-layer.labels" . | nindent 4 }}
+data:
+  ACCESS_ENV: {{ .Values.config.environment | quote }}
+  ACCESS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  ACCESS_REDIS_URL: {{ .Values.config.redisUrl | quote }}
+  ACCESS_POSTGRES_DSN: {{ .Values.config.postgresDsn | quote }}
+  ACCESS_KAFKA_BOOTSTRAP: {{ .Values.config.kafkaBootstrap | quote }}
+  ACCESS_JWKS_URL: {{ .Values.config.jwksUrl | quote }}
+  ACCESS_AUTH_SERVICE_URL: {{ .Values.config.authServiceUrl | quote }}
+  ACCESS_ENTITLEMENTS_SERVICE_URL: {{ .Values.config.entitlementsServiceUrl | quote }}
+  ACCESS_METRICS_SERVICE_URL: {{ .Values.config.metricsServiceUrl | quote }}
+  ACCESS_ENABLE_TRACING: {{ .Values.config.enableTracing | quote }}
+  ACCESS_TRACE_SAMPLING_RATE: {{ .Values.config.traceSamplingRate | quote }}
+  ACCESS_OTEL_EXPORTER: {{ .Values.config.otelExporter | quote }}

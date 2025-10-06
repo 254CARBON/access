@@ -1,0 +1,1 @@
+{{- include "deployment.yaml" (dict "serviceName" "streaming" "Values" .Values "Chart" .Chart "Release" .Release) }}

@@ -1,0 +1,21 @@
+# 254Carbon Access Layer - Agent Context
+#
+# This file documents high-level repository context and conventions used by
+# automation/agents to keep changes consistent with project rules.
+repo: 254carbon-access
+services:
+  - gateway
+  - streaming
+  - auth
+  - entitlements
+  - metrics
+contracts_from: specs.lock.json  # Source of truth for API contract versions
+rules:
+  - Do not add cross-service imports outside shared/ boundary  # Preserve boundaries
+  - Use provided service-manifest.yaml when updating metadata
+  - Validate OpenAPI sync before committing
+  - Follow SOLID principles and maintain high cohesion
+  - Keep services stateless and horizontally scalable
+  - Implement proper error handling and observability
+  - Use structured logging with trace correlation
+  - Maintain clear service boundaries for future splits

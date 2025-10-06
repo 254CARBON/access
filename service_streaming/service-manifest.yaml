@@ -1,0 +1,21 @@
+## Service Manifest: Streaming
+## Provides realtime streaming (WebSocket/SSE) of market/pricing updates.
+service_name: streaming
+domain: access
+runtime: python
+language_version: "3.12"
+api_contracts:
+  - streaming-core@1.0.0
+events_in:
+  - pricing.curve.updates.v1
+  - market.data.updates.v1
+events_out:
+  - metrics.connection.count.v1
+dependencies:
+  internal: [auth, entitlements, metrics]
+  external: [redis, kafka]
+maturity: stable
+sla:
+  p95_latency_ms: 250
+  availability: "99.0%"
+owner: platform

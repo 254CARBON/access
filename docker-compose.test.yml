@@ -1,0 +1,231 @@
+## 254Carbon Access Layer - Test Compose Stack
+##
+## Purpose:
+## - Isolated test environment for integration tests
+## - Uses mock services for external dependencies
+## - Optimized for fast test execution
+##
+## Usage:
+## - Run integration tests against this stack
+## - Each test run gets a fresh environment
+## - Services are configured for testing
+version: '3.8'
+
+services:
+  # Mock External Services
+  mock-keycloak:
+    build:
+      context: .
+      dockerfile: mocks/keycloak/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mock-kafka:
+    build:
+      context: .
+      dockerfile: mocks/kafka/Dockerfile
+    ports:
+      - "9092:9092"
+    environment:
+      - PORT=9092
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9092/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mock-clickhouse:
+    build:
+      context: .
+      dockerfile: mocks/clickhouse/Dockerfile
+    ports:
+      - "8123:8123"
+    environment:
+      - PORT=8123
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Test Infrastructure
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres-test:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=access_test
+      - POSTGRES_USER=test_user
+      - POSTGRES_PASSWORD=test_pass
+    volumes:
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d access_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Test Services
+  auth-service-test:
+    build:
+      context: .
+      dockerfile: service_auth/Dockerfile
+    ports:
+      - "8010:8010"
+    environment:
+      - ACCESS_ENV=test
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_JWKS_URL=http://mock-keycloak:8080/realms/254carbon/protocol/openid-connect/certs
+      - ACCESS_REDIS_URL=redis://redis-test:6379/0
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service-test:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      mock-keycloak:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  entitlements-service-test:
+    build:
+      context: .
+      dockerfile: service_entitlements/Dockerfile
+    ports:
+      - "8011:8011"
+    environment:
+      - ACCESS_ENV=test
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_REDIS_URL=redis://redis-test:6379/0
+      - ACCESS_POSTGRES_DSN=postgresql://test_user:test_pass@postgres-test:5432/access_test
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service-test:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  metrics-service-test:
+    build:
+      context: .
+      dockerfile: service_metrics/Dockerfile
+    ports:
+      - "8012:8012"
+    environment:
+      - ACCESS_ENV=test
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_METRICS_ENDPOINT=http://localhost:8012
+      - ACCESS_ENABLE_TRACING=false
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  streaming-service-test:
+    build:
+      context: .
+      dockerfile: service_streaming/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - ACCESS_ENV=test
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_KAFKA_BOOTSTRAP=mock-kafka:9092
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service-test:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service-test:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service-test:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      mock-kafka:
+        condition: service_healthy
+      auth-service-test:
+        condition: service_healthy
+      entitlements-service-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  gateway-service-test:
+    build:
+      context: .
+      dockerfile: service_gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ACCESS_ENV=test
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_REDIS_URL=redis://redis-test:6379/0
+      - ACCESS_CLICKHOUSE_URL=http://mock-clickhouse:8123
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service-test:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service-test:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service-test:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      redis-test:
+        condition: service_healthy
+      mock-clickhouse:
+        condition: service_healthy
+      auth-service-test:
+        condition: service_healthy
+      entitlements-service-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  test-network:
+    driver: bridge

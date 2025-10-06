@@ -1,0 +1,184 @@
+## 254Carbon Access Layer - Local Development Compose Stack
+##
+## Purpose:
+## - Provides local instances of core dependencies (Redis, Postgres, Kafka, Keycloak)
+## - Builds and runs all Access Layer services for end-to-end dev/testing
+##
+## Notes:
+## - Healthchecks gate service startup order where necessary
+## - Environment variables are tuned for local development
+## - Data is persisted in named volumes between runs
+version: '3.8'
+
+services:
+  # External dependencies
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: access
+      POSTGRES_USER: access
+      POSTGRES_PASSWORD: access
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U access"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # Access Layer services
+  gateway:
+    build:
+      context: .
+      dockerfile: service_gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ACCESS_ENV: local
+      ACCESS_REDIS_URL: redis://redis:6379/0
+      ACCESS_AUTH_SERVICE_URL: http://auth:8010
+      ACCESS_ENTITLEMENTS_SERVICE_URL: http://entitlements:8011
+      ACCESS_METRICS_SERVICE_URL: http://metrics:8012
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  streaming:
+    build:
+      context: .
+      dockerfile: service_streaming/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      ACCESS_ENV: local
+      ACCESS_REDIS_URL: redis://redis:6379/0
+      ACCESS_KAFKA_BOOTSTRAP: kafka:9092
+      ACCESS_AUTH_SERVICE_URL: http://auth:8010
+      ACCESS_ENTITLEMENTS_SERVICE_URL: http://entitlements:8011
+      ACCESS_METRICS_SERVICE_URL: http://metrics:8012
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  auth:
+    build:
+      context: .
+      dockerfile: service_auth/Dockerfile
+    ports:
+      - "8010:8010"
+    environment:
+      ACCESS_ENV: local
+      ACCESS_JWKS_URL: http://keycloak:8080/realms/254carbon/protocol/openid-connect/certs
+    depends_on:
+      - keycloak
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  entitlements:
+    build:
+      context: .
+      dockerfile: service_entitlements/Dockerfile
+    ports:
+      - "8011:8011"
+    environment:
+      ACCESS_ENV: local
+      ACCESS_REDIS_URL: redis://redis:6379/0
+      ACCESS_POSTGRES_DSN: postgres://access:access@postgres:5432/access
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  metrics:
+    build:
+      context: .
+      dockerfile: service_metrics/Dockerfile
+    ports:
+      - "8012:8012"
+    environment:
+      ACCESS_ENV: local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Keycloak for authentication
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    command: start-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  redis_data:
+  postgres_data:

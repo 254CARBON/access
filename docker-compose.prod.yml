@@ -1,0 +1,264 @@
+## 254Carbon Access Layer - Production Compose Stack
+##
+## Purpose:
+## - Production-ready deployment with external dependencies
+## - Optimized for performance and reliability
+## - Includes monitoring and observability stack
+##
+## Usage:
+## - Set environment variables for production configuration
+## - Use external Redis, PostgreSQL, Kafka, and Keycloak instances
+## - Deploy with proper secrets management
+version: '3.8'
+
+services:
+  # Access Layer Services
+  gateway-service:
+    image: ghcr.io/254carbon/gateway:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - ACCESS_ENV=production
+      - ACCESS_LOG_LEVEL=info
+      - ACCESS_REDIS_URL=${REDIS_URL}
+      - ACCESS_CLICKHOUSE_URL=${CLICKHOUSE_URL}
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=true
+      - ACCESS_TRACE_SAMPLING_RATE=0.1
+      - OTEL_EXPORTER=http://jaeger:14268/api/traces
+      - ENABLE_CONSOLE_TRACING=false
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  streaming-service:
+    image: ghcr.io/254carbon/streaming:latest
+    ports:
+      - "8001:8001"
+    environment:
+      - ACCESS_ENV=production
+      - ACCESS_LOG_LEVEL=info
+      - ACCESS_KAFKA_BOOTSTRAP=${KAFKA_BOOTSTRAP}
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=true
+      - ACCESS_TRACE_SAMPLING_RATE=0.1
+      - OTEL_EXPORTER=http://jaeger:14268/api/traces
+      - ENABLE_CONSOLE_TRACING=false
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  auth-service:
+    image: ghcr.io/254carbon/auth:latest
+    ports:
+      - "8010:8010"
+    environment:
+      - ACCESS_ENV=production
+      - ACCESS_LOG_LEVEL=info
+      - ACCESS_JWKS_URL=${KEYCLOAK_JWKS_URL}
+      - ACCESS_REDIS_URL=${REDIS_URL}
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=true
+      - ACCESS_TRACE_SAMPLING_RATE=0.1
+      - OTEL_EXPORTER=http://jaeger:14268/api/traces
+      - ENABLE_CONSOLE_TRACING=false
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
+  entitlements-service:
+    image: ghcr.io/254carbon/entitlements:latest
+    ports:
+      - "8011:8011"
+    environment:
+      - ACCESS_ENV=production
+      - ACCESS_LOG_LEVEL=info
+      - ACCESS_REDIS_URL=${REDIS_URL}
+      - ACCESS_POSTGRES_DSN=${POSTGRES_DSN}
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=true
+      - ACCESS_TRACE_SAMPLING_RATE=0.1
+      - OTEL_EXPORTER=http://jaeger:14268/api/traces
+      - ENABLE_CONSOLE_TRACING=false
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  metrics-service:
+    image: ghcr.io/254carbon/metrics:latest
+    ports:
+      - "8012:8012"
+    environment:
+      - ACCESS_ENV=production
+      - ACCESS_LOG_LEVEL=info
+      - ACCESS_METRICS_ENDPOINT=http://localhost:8012
+      - ACCESS_ENABLE_TRACING=true
+      - ACCESS_TRACE_SAMPLING_RATE=0.1
+      - OTEL_EXPORTER=http://jaeger:14268/api/traces
+      - ENABLE_CONSOLE_TRACING=false
+      - LOG_LEVEL=info
+      - ENABLE_METRICS=true
+      - METRICS_PORT=9090
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - access-layer
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - access-layer
+    restart: unless-stopped
+
+  # Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # HTTP collector
+      - "14250:14250"  # gRPC collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - access-layer
+    restart: unless-stopped
+
+  # Load Balancer
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    networks:
+      - access-layer
+    depends_on:
+      - gateway-service
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  access-layer:
+    driver: bridge

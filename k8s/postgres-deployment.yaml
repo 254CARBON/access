@@ -1,0 +1,141 @@
+## PostgreSQL Deployment + Service
+##
+## This manifest deploys PostgreSQL for entitlements persistence.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: 254carbon-access
+  labels:
+    app: postgres
+    service: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        service: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "access"
+        - name: POSTGRES_USER
+          value: "access"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - access
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - access
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: 254carbon-access
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: 254carbon-access
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: 254carbon-access
+type: Opaque
+data:
+  password: YWNjZXNz # base64 encoded "access"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: 254carbon-access
+data:
+  init-db.sql: |
+    -- Initialize entitlements tables
+    CREATE TABLE IF NOT EXISTS entitlement_rules (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        description TEXT,
+        conditions JSONB NOT NULL,
+        actions JSONB NOT NULL,
+        priority INTEGER DEFAULT 0,
+        enabled BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_entitlement_rules_enabled ON entitlement_rules(enabled);
+    CREATE INDEX IF NOT EXISTS idx_entitlement_rules_priority ON entitlement_rules(priority);
+    
+    -- Insert default rules
+    INSERT INTO entitlement_rules (name, description, conditions, actions, priority) VALUES
+    ('admin_full_access', 'Administrators have full access', 
+     '{"user_role": "admin"}', 
+     '{"allow": true, "permissions": ["*"]}', 100),
+    ('user_basic_access', 'Users have basic access', 
+     '{"user_role": "user"}', 
+     '{"allow": true, "permissions": ["read"]}', 50)
+    ON CONFLICT (name) DO NOTHING;

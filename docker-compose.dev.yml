@@ -1,0 +1,227 @@
+version: '3.8'
+
+services:
+  # Mock External Services
+  mock-keycloak:
+    build:
+      context: .
+      dockerfile: mocks/keycloak/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mock-kafka:
+    build:
+      context: .
+      dockerfile: mocks/kafka/Dockerfile
+    ports:
+      - "9092:9092"
+    environment:
+      - PORT=9092
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9092/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mock-clickhouse:
+    build:
+      context: .
+      dockerfile: mocks/clickhouse/Dockerfile
+    ports:
+      - "8123:8123"
+    environment:
+      - PORT=8123
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Infrastructure Services
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=access_layer
+      - POSTGRES_USER=access_user
+      - POSTGRES_PASSWORD=access_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U access_user -d access_layer"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Access Layer Services
+  auth-service:
+    build:
+      context: .
+      dockerfile: service_auth/Dockerfile
+    ports:
+      - "8010:8010"
+    environment:
+      - ACCESS_ENV=dev-mocks
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_JWKS_URL=http://mock-keycloak:8080/realms/254carbon/protocol/openid-connect/certs
+      - ACCESS_REDIS_URL=redis://redis:6379/0
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      mock-keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  entitlements-service:
+    build:
+      context: .
+      dockerfile: service_entitlements/Dockerfile
+    ports:
+      - "8011:8011"
+    environment:
+      - ACCESS_ENV=dev-mocks
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_REDIS_URL=redis://redis:6379/0
+      - ACCESS_POSTGRES_DSN=postgresql://access_user:access_pass@postgres:5432/access_layer
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  metrics-service:
+    build:
+      context: .
+      dockerfile: service_metrics/Dockerfile
+    ports:
+      - "8012:8012"
+    environment:
+      - ACCESS_ENV=dev-mocks
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_METRICS_ENDPOINT=http://localhost:8012
+      - ACCESS_ENABLE_TRACING=false
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  streaming-service:
+    build:
+      context: .
+      dockerfile: service_streaming/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - ACCESS_ENV=dev-mocks
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_KAFKA_BOOTSTRAP=mock-kafka:9092
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      mock-kafka:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      entitlements-service:
+        condition: service_healthy
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  gateway-service:
+    build:
+      context: .
+      dockerfile: service_gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ACCESS_ENV=dev-mocks
+      - ACCESS_LOG_LEVEL=debug
+      - ACCESS_REDIS_URL=redis://redis:6379/0
+      - ACCESS_CLICKHOUSE_URL=http://mock-clickhouse:8123
+      - ACCESS_AUTH_SERVICE_URL=http://auth-service:8010
+      - ACCESS_ENTITLEMENTS_SERVICE_URL=http://entitlements-service:8011
+      - ACCESS_METRICS_ENDPOINT=http://metrics-service:8012
+      - ACCESS_ENABLE_TRACING=false
+    depends_on:
+      redis:
+        condition: service_healthy
+      mock-clickhouse:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      entitlements-service:
+        condition: service_healthy
+    networks:
+      - access-layer
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  access-layer:
+    driver: bridge
