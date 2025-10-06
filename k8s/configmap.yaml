@@ -1,19 +1,120 @@
-## Shared configuration for Access Layer services (ConfigMap)
+## Production Configuration for Access Layer services (ConfigMap)
 ## Deployed into the 254carbon-access namespace and consumed via env vars.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: access-config
   namespace: 254carbon-access
+  labels:
+    app: access-layer
+    environment: production
 data:
+  # Environment Configuration
   ACCESS_ENV: "production"
   ACCESS_LOG_LEVEL: "info"
-  ACCESS_REDIS_URL: "redis://redis-service:6379/0"
-  ACCESS_POSTGRES_DSN: "postgres://access:access@postgres-service:5432/access"
-  ACCESS_KAFKA_BOOTSTRAP: "kafka-service:9092"
-  ACCESS_JWKS_URL: "http://keycloak-service:8080/realms/254carbon/protocol/openid-connect/certs"
+  ACCESS_LOG_FORMAT: "json"
+  ACCESS_ENABLE_TRACING: "true"
+  ACCESS_ENABLE_METRICS: "true"
+  
+  # Service URLs
   ACCESS_AUTH_SERVICE_URL: "http://auth-service:8010"
   ACCESS_ENTITLEMENTS_SERVICE_URL: "http://entitlements-service:8011"
   ACCESS_METRICS_SERVICE_URL: "http://metrics-service:8012"
-  ACCESS_ENABLE_TRACING: "true"
-  ACCESS_OTEL_EXPORTER: "http://otel-collector:4318"
+  ACCESS_STREAMING_SERVICE_URL: "http://streaming-service:8001"
+  
+  # Database Configuration
+  ACCESS_POSTGRES_HOST: "postgres-service"
+  ACCESS_POSTGRES_PORT: "5432"
+  ACCESS_POSTGRES_DB: "access"
+  ACCESS_POSTGRES_SSLMODE: "require"
+  ACCESS_POSTGRES_POOL_SIZE: "20"
+  ACCESS_POSTGRES_MAX_OVERFLOW: "30"
+  ACCESS_POSTGRES_POOL_TIMEOUT: "30"
+  ACCESS_POSTGRES_POOL_RECYCLE: "3600"
+  
+  # Redis Configuration
+  ACCESS_REDIS_HOST: "redis-service"
+  ACCESS_REDIS_PORT: "6379"
+  ACCESS_REDIS_DB: "0"
+  ACCESS_REDIS_PASSWORD_REQUIRED: "true"
+  ACCESS_REDIS_POOL_SIZE: "20"
+  ACCESS_REDIS_POOL_TIMEOUT: "30"
+  ACCESS_REDIS_RETRY_ON_TIMEOUT: "true"
+  
+  # Kafka Configuration
+  ACCESS_KAFKA_BOOTSTRAP: "kafka-service:9092"
+  ACCESS_KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
+  ACCESS_KAFKA_CONSUMER_GROUP: "access-layer"
+  ACCESS_KAFKA_AUTO_OFFSET_RESET: "latest"
+  ACCESS_KAFKA_ENABLE_AUTO_COMMIT: "true"
+  ACCESS_KAFKA_SESSION_TIMEOUT: "30000"
+  ACCESS_KAFKA_HEARTBEAT_INTERVAL: "10000"
+  
+  # Keycloak Configuration
+  ACCESS_KEYCLOAK_BASE_URL: "http://keycloak-service:8080"
+  ACCESS_KEYCLOAK_REALM: "254carbon"
+  ACCESS_KEYCLOAK_CLIENT_ID: "access-layer"
+  ACCESS_JWKS_URL: "http://keycloak-service:8080/realms/254carbon/protocol/openid-connect/certs"
+  ACCESS_JWKS_CACHE_TTL: "3600"
+  ACCESS_JWKS_CACHE_REFRESH: "300"
+  
+  # Rate Limiting Configuration
+  ACCESS_RATE_LIMIT_ENABLED: "true"
+  ACCESS_RATE_LIMIT_PUBLIC: "1000"
+  ACCESS_RATE_LIMIT_AUTHENTICATED: "5000"
+  ACCESS_RATE_LIMIT_HEAVY: "100"
+  ACCESS_RATE_LIMIT_ADMIN: "10000"
+  ACCESS_RATE_LIMIT_WINDOW: "3600"
+  
+  # Caching Configuration
+  ACCESS_CACHE_ENABLED: "true"
+  ACCESS_CACHE_TTL: "300"
+  ACCESS_CACHE_MAX_SIZE: "10000"
+  ACCESS_CACHE_CLEANUP_INTERVAL: "600"
+  
+  # Circuit Breaker Configuration
+  ACCESS_CIRCUIT_BREAKER_ENABLED: "true"
+  ACCESS_CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+  ACCESS_CIRCUIT_BREAKER_TIMEOUT: "60"
+  ACCESS_CIRCUIT_BREAKER_RETRY_TIMEOUT: "30"
+  
+  # Monitoring Configuration
+  ACCESS_PROMETHEUS_ENABLED: "true"
+  ACCESS_PROMETHEUS_PORT: "8000"
+  ACCESS_PROMETHEUS_PATH: "/metrics"
+  ACCESS_HEALTH_CHECK_ENABLED: "true"
+  ACCESS_HEALTH_CHECK_INTERVAL: "30"
+  
+  # Tracing Configuration
+  ACCESS_OTEL_ENABLED: "true"
+  ACCESS_OTEL_EXPORTER: "otlp"
+  ACCESS_OTEL_ENDPOINT: "http://otel-collector:4318"
+  ACCESS_OTEL_SERVICE_NAME: "access-layer"
+  ACCESS_OTEL_SERVICE_VERSION: "v1.0.0"
+  ACCESS_OTEL_SAMPLING_RATIO: "0.1"
+  
+  # Security Configuration
+  ACCESS_SECURITY_ENABLED: "true"
+  ACCESS_CORS_ENABLED: "true"
+  ACCESS_CORS_ORIGINS: "https://app.254carbon.com,https://admin.254carbon.com"
+  ACCESS_CORS_METHODS: "GET,POST,PUT,DELETE,OPTIONS"
+  ACCESS_CORS_HEADERS: "Content-Type,Authorization,X-API-Key"
+  ACCESS_CORS_CREDENTIALS: "true"
+  
+  # Performance Configuration
+  ACCESS_WORKER_PROCESSES: "4"
+  ACCESS_WORKER_CONNECTIONS: "1000"
+  ACCESS_KEEPALIVE_TIMEOUT: "65"
+  ACCESS_CLIENT_MAX_BODY_SIZE: "10m"
+  ACCESS_PROXY_TIMEOUT: "60"
+  ACCESS_PROXY_READ_TIMEOUT: "60"
+  ACCESS_PROXY_SEND_TIMEOUT: "60"
+  
+  # Feature Flags
+  ACCESS_FEATURE_WEBSOCKET: "true"
+  ACCESS_FEATURE_SSE: "true"
+  ACCESS_FEATURE_METRICS: "true"
+  ACCESS_FEATURE_TRACING: "true"
+  ACCESS_FEATURE_CACHING: "true"
+  ACCESS_FEATURE_RATE_LIMITING: "true"
+  ACCESS_FEATURE_CIRCUIT_BREAKER: "true"

@@ -1,0 +1,340 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly on Monday at 2 AM
+  workflow_dispatch:
+
+jobs:
+  code-security:
+    name: Code Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+
+    - name: Run Bandit security linter
+      run: |
+        bandit -r service_*/app/ shared/ \
+          -f json \
+          -o bandit-report.json \
+          -ll \
+          --skip B101,B601 || true
+
+    - name: Upload Bandit report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+    - name: Run safety check
+      run: |
+        safety check --json --output safety-report.json || true
+
+    - name: Upload safety report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: safety-report
+        path: safety-report.json
+
+    - name: Run semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/python
+          p/docker
+        generateSarif: "1"
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep.sarif
+
+  dependency-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+
+    - name: Run pip-audit
+      run: |
+        pip install pip-audit
+        pip-audit --format=json --output=pip-audit-report.json || true
+
+    - name: Upload pip-audit report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: pip-audit-report
+        path: pip-audit-report.json
+
+    - name: Run safety check (detailed)
+      run: |
+        safety check --json --output safety-detailed-report.json || true
+
+    - name: Upload detailed safety report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: safety-detailed-report
+        path: safety-detailed-report.json
+
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    strategy:
+      matrix:
+        service: [gateway, streaming, auth, entitlements, metrics]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./service_${{ matrix.service }}/Dockerfile
+        platforms: linux/amd64
+        push: false
+        tags: ${{ matrix.service }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ matrix.service }}:latest
+        format: 'sarif'
+        output: 'trivy-results-${{ matrix.service }}.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+
+    - name: Run Trivy vulnerability scanner (table format)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ matrix.service }}:latest
+        format: 'table'
+        output: 'trivy-table-${{ matrix.service }}.txt'
+
+    - name: Upload Trivy table results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: trivy-table-${{ matrix.service }}
+        path: trivy-table-${{ matrix.service }}.txt
+
+    - name: Run Trivy filesystem scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-fs-results-${{ matrix.service }}.sarif'
+
+    - name: Upload Trivy filesystem scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-fs-results-${{ matrix.service }}.sarif'
+
+  secrets-scan:
+    name: Secrets Detection
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+    - name: Run GitLeaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  infrastructure-security:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: dockerfile,kubernetes,terraform
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+
+    - name: Upload Checkov results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: checkov-results.sarif
+
+    - name: Run Kube-score
+      run: |
+        # Install kube-score
+        curl -L https://github.com/zegl/kube-score/releases/latest/download/kube-score_linux_amd64.tar.gz | tar xvz
+        sudo mv kube-score /usr/local/bin/
+        
+        # Run kube-score on Kubernetes manifests
+        kube-score score k8s/*.yaml --output-format json > kube-score-results.json || true
+
+    - name: Upload kube-score results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: kube-score-results
+        path: kube-score-results.json
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [code-security, dependency-scan, container-security, secrets-scan, infrastructure-security]
+    if: always()
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate security summary
+      run: |
+        echo "# Security Scan Summary" > security-summary.md
+        echo "" >> security-summary.md
+        echo "Generated on: $(date)" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        echo "## Scan Results" >> security-summary.md
+        echo "" >> security-summary.md
+        
+        # Check Bandit results
+        if [ -f "bandit-report/bandit-report.json" ]; then
+          echo "### Bandit Security Linter" >> security-summary.md
+          echo "- ✅ Bandit scan completed" >> security-summary.md
+          echo "" >> security-summary.md
+        fi
+        
+        # Check Safety results
+        if [ -f "safety-report/safety-report.json" ]; then
+          echo "### Safety Dependency Check" >> security-summary.md
+          echo "- ✅ Safety scan completed" >> security-summary.md
+          echo "" >> security-summary.md
+        fi
+        
+        # Check Trivy results
+        for service in gateway streaming auth entitlements metrics; do
+          if [ -f "trivy-table-${service}/trivy-table-${service}.txt" ]; then
+            echo "### Trivy Container Scan - ${service}" >> security-summary.md
+            echo "- ✅ Trivy scan completed for ${service}" >> security-summary.md
+            echo "" >> security-summary.md
+          fi
+        done
+        
+        # Check Checkov results
+        if [ -f "checkov-results.sarif" ]; then
+          echo "### Checkov Infrastructure Scan" >> security-summary.md
+          echo "- ✅ Checkov scan completed" >> security-summary.md
+          echo "" >> security-summary.md
+        fi
+        
+        echo "## Recommendations" >> security-summary.md
+        echo "" >> security-summary.md
+        echo "1. Review all security scan results" >> security-summary.md
+        echo "2. Address high and critical vulnerabilities" >> security-summary.md
+        echo "3. Update dependencies with known vulnerabilities" >> security-summary.md
+        echo "4. Implement security best practices" >> security-summary.md
+        echo "5. Regular security audits" >> security-summary.md
+
+    - name: Upload security summary
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-summary
+        path: security-summary.md
+
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('security-summary.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });
+
+  notify-security:
+    name: Notify Security Issues
+    runs-on: ubuntu-latest
+    needs: [code-security, dependency-scan, container-security, secrets-scan, infrastructure-security]
+    if: always() && (needs.code-security.result == 'failure' || needs.dependency-scan.result == 'failure' || needs.container-security.result == 'failure' || needs.secrets-scan.result == 'failure' || needs.infrastructure-security.result == 'failure')
+
+    steps:
+    - name: Notify security team
+      run: |
+        echo "🚨 Security scan detected issues!"
+        echo "Please review the security scan results and address any critical vulnerabilities."
+        echo ""
+        echo "Scan results:"
+        echo "- Code Security: ${{ needs.code-security.result }}"
+        echo "- Dependency Scan: ${{ needs.dependency-scan.result }}"
+        echo "- Container Security: ${{ needs.container-security.result }}"
+        echo "- Secrets Scan: ${{ needs.secrets-scan.result }}"
+        echo "- Infrastructure Security: ${{ needs.infrastructure-security.result }}"

@@ -1,0 +1,302 @@
+name: Staging Deployment
+
+on:
+  push:
+    branches: [ develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - preview
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: 254carbon/access-layer
+
+jobs:
+  build-staging:
+    name: Build Staging Images
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=staging,enable={{is_default_branch}}
+
+    - name: Build and push multi-arch images
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          VCS_REF=${{ github.sha }}
+          VERSION=${{ github.ref_name }}
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-staging
+    environment: staging
+    if: github.ref == 'refs/heads/develop' || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl for staging
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Deploy to staging
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Set namespace
+        kubectl config set-context --current --namespace=staging
+        
+        # Update image tags in manifests
+        for service in gateway streaming auth entitlements metrics; do
+          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${service}:staging|g" k8s/${service}-deployment.yaml
+        done
+        
+        # Apply manifests
+        kubectl apply -f k8s/
+        
+        # Wait for rollout
+        kubectl rollout status deployment/gateway-deployment --timeout=300s
+        kubectl rollout status deployment/streaming-deployment --timeout=300s
+        kubectl rollout status deployment/auth-deployment --timeout=300s
+        kubectl rollout status deployment/entitlements-deployment --timeout=300s
+        kubectl rollout status deployment/metrics-deployment --timeout=300s
+
+    - name: Run staging smoke tests
+      run: |
+        export KUBECONFIG=kubeconfig
+        kubectl config set-context --current --namespace=staging
+        
+        # Wait for services to be ready
+        kubectl wait --for=condition=ready pod -l app=gateway --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=streaming --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=auth --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=entitlements --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=metrics --timeout=300s
+        
+        # Run smoke tests
+        ./scripts/smoke.sh staging
+
+    - name: Run integration tests
+      run: |
+        export KUBECONFIG=kubeconfig
+        kubectl config set-context --current --namespace=staging
+        
+        # Run integration tests against staging
+        python -m pytest tests/integration/ -v --tb=short
+
+    - name: Performance test
+      run: |
+        export KUBECONFIG=kubeconfig
+        kubectl config set-context --current --current --namespace=staging
+        
+        # Get staging service URLs
+        GATEWAY_URL=$(kubectl get service gateway-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        STREAMING_URL=$(kubectl get service streaming-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        # Run basic performance test
+        python tests/performance/websocket_load_test.py \
+          --streaming-url "ws://${STREAMING_URL}:8080" \
+          --users 10 \
+          --duration 60
+
+  deploy-preview:
+    name: Deploy Preview Environment
+    runs-on: ubuntu-latest
+    needs: build-staging
+    environment: preview
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl for preview
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PREVIEW }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Deploy preview environment
+      run: |
+        export KUBECONFIG=kubeconfig
+        
+        # Create preview namespace
+        kubectl create namespace preview-${{ github.event.number }} --dry-run=client -o yaml | kubectl apply -f -
+        kubectl config set-context --current --namespace=preview-${{ github.event.number }}
+        
+        # Update image tags in manifests
+        for service in gateway streaming auth entitlements metrics; do
+          sed -i "s|image: .*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${service}:pr-${{ github.event.number }}|g" k8s/${service}-deployment.yaml
+        done
+        
+        # Apply manifests
+        kubectl apply -f k8s/
+        
+        # Wait for rollout
+        kubectl rollout status deployment/gateway-deployment --timeout=300s
+        kubectl rollout status deployment/streaming-deployment --timeout=300s
+        kubectl rollout status deployment/auth-deployment --timeout=300s
+        kubectl rollout status deployment/entitlements-deployment --timeout=300s
+        kubectl rollout status deployment/metrics-deployment --timeout=300s
+
+    - name: Run preview smoke tests
+      run: |
+        export KUBECONFIG=kubeconfig
+        kubectl config set-context --current --namespace=preview-${{ github.event.number }}
+        
+        # Wait for services to be ready
+        kubectl wait --for=condition=ready pod -l app=gateway --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=streaming --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=auth --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=entitlements --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=metrics --timeout=300s
+        
+        # Run smoke tests
+        ./scripts/smoke.sh preview
+
+    - name: Comment on PR with preview URL
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Get preview service URLs
+          const { execSync } = require('child_process');
+          const gatewayUrl = execSync('kubectl get service gateway-service -o jsonpath="{.status.loadBalancer.ingress[0].ip}"', { encoding: 'utf8' }).trim();
+          const streamingUrl = execSync('kubectl get service streaming-service -o jsonpath="{.status.loadBalancer.ingress[0].ip}"', { encoding: 'utf8' }).trim();
+          
+          const comment = `
+          ## 🚀 Preview Environment Deployed
+          
+          Your changes have been deployed to a preview environment:
+          
+          ### Services
+          - **Gateway**: http://${gatewayUrl}:8080
+          - **Streaming**: ws://${streamingUrl}:8080
+          
+          ### Testing
+          You can test your changes using:
+          \`\`\`bash
+          # Test Gateway API
+          curl http://${gatewayUrl}:8080/api/v1/health
+          
+          # Test WebSocket connection
+          wscat -c ws://${streamingUrl}:8080/ws
+          \`\`\`
+          
+          ### Cleanup
+          This preview environment will be automatically cleaned up when the PR is closed.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  cleanup-preview:
+    name: Cleanup Preview Environment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+
+    steps:
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl for preview
+      run: |
+        echo "${{ secrets.KUBE_CONFIG_PREVIEW }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Cleanup preview namespace
+      run: |
+        export KUBECONFIG=kubeconfig
+        kubectl delete namespace preview-${{ github.event.number }} --ignore-not-found=true
+
+  notify-deployment:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-preview]
+    if: always()
+
+    steps:
+    - name: Notify deployment success
+      if: needs.deploy-staging.result == 'success' || needs.deploy-preview.result == 'success'
+      run: |
+        echo "✅ Deployment successful!"
+        if [ "${{ needs.deploy-staging.result }}" == "success" ]; then
+          echo "Staging environment updated"
+        fi
+        if [ "${{ needs.deploy-preview.result }}" == "success" ]; then
+          echo "Preview environment created"
+        fi
+
+    - name: Notify deployment failure
+      if: needs.deploy-staging.result == 'failure' || needs.deploy-preview.result == 'failure'
+      run: |
+        echo "❌ Deployment failed!"
+        if [ "${{ needs.deploy-staging.result }}" == "failure" ]; then
+          echo "Staging deployment failed"
+        fi
+        if [ "${{ needs.deploy-preview.result }}" == "failure" ]; then
+          echo "Preview deployment failed"
+        fi
+        exit 1

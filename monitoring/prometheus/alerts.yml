@@ -1,0 +1,274 @@
+groups:
+  - name: gateway_alerts
+    rules:
+      - alert: GatewayHighErrorRate
+        expr: rate(gateway_requests_total{status=~"5.."}[5m]) / rate(gateway_requests_total[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Gateway service high error rate"
+          description: "Gateway service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+
+      - alert: GatewayHighLatency
+        expr: histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Gateway service high latency"
+          description: "Gateway service 95th percentile latency is {{ $value }}s"
+
+      - alert: GatewayCircuitBreakerOpen
+        expr: gateway_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: critical
+          service: gateway
+        annotations:
+          summary: "Gateway circuit breaker is open"
+          description: "Gateway circuit breaker is open for {{ $labels.service }}"
+
+      - alert: GatewayRateLimitExceeded
+        expr: rate(gateway_rate_limit_exceeded_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: "Gateway rate limit exceeded"
+          description: "Gateway rate limit exceeded {{ $value }} times in the last 5 minutes"
+
+  - name: streaming_alerts
+    rules:
+      - alert: StreamingHighConnectionCount
+        expr: streaming_websocket_connections_total > 10000
+        for: 5m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Streaming service high connection count"
+          description: "Streaming service has {{ $value }} active WebSocket connections"
+
+      - alert: StreamingMessageProcessingLatency
+        expr: histogram_quantile(0.95, rate(streaming_message_processing_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Streaming service high message processing latency"
+          description: "Streaming service 95th percentile message processing latency is {{ $value }}s"
+
+      - alert: StreamingKafkaConsumerLag
+        expr: streaming_kafka_consumer_lag > 1000
+        for: 2m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Streaming service Kafka consumer lag"
+          description: "Streaming service Kafka consumer lag is {{ $value }} messages"
+
+      - alert: StreamingConnectionDropRate
+        expr: rate(streaming_connections_dropped_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+          service: streaming
+        annotations:
+          summary: "Streaming service high connection drop rate"
+          description: "Streaming service dropped {{ $value }} connections in the last 5 minutes"
+
+  - name: auth_alerts
+    rules:
+      - alert: AuthHighErrorRate
+        expr: rate(auth_requests_total{status=~"5.."}[5m]) / rate(auth_requests_total[5m]) > 0.02
+        for: 2m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Auth service high error rate"
+          description: "Auth service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+
+      - alert: AuthJWKSFetchFailure
+        expr: rate(auth_jwks_fetch_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: auth
+        annotations:
+          summary: "Auth service JWKS fetch failures"
+          description: "Auth service failed to fetch JWKS {{ $value }} times in the last 5 minutes"
+
+      - alert: AuthTokenValidationLatency
+        expr: histogram_quantile(0.95, rate(auth_token_validation_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: auth
+        annotations:
+          summary: "Auth service high token validation latency"
+          description: "Auth service 95th percentile token validation latency is {{ $value }}s"
+
+  - name: entitlements_alerts
+    rules:
+      - alert: EntitlementsHighErrorRate
+        expr: rate(entitlements_requests_total{status=~"5.."}[5m]) / rate(entitlements_requests_total[5m]) > 0.02
+        for: 2m
+        labels:
+          severity: warning
+          service: entitlements
+        annotations:
+          summary: "Entitlements service high error rate"
+          description: "Entitlements service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+
+      - alert: EntitlementsRuleEngineLatency
+        expr: histogram_quantile(0.95, rate(entitlements_rule_evaluation_duration_seconds_bucket[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          service: entitlements
+        annotations:
+          summary: "Entitlements service high rule evaluation latency"
+          description: "Entitlements service 95th percentile rule evaluation latency is {{ $value }}s"
+
+      - alert: EntitlementsCacheMissRate
+        expr: rate(entitlements_cache_misses_total[5m]) / rate(entitlements_cache_requests_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: entitlements
+        annotations:
+          summary: "Entitlements service high cache miss rate"
+          description: "Entitlements service cache miss rate is {{ $value | humanizePercentage }}"
+
+  - name: metrics_alerts
+    rules:
+      - alert: MetricsHighErrorRate
+        expr: rate(metrics_requests_total{status=~"5.."}[5m]) / rate(metrics_requests_total[5m]) > 0.02
+        for: 2m
+        labels:
+          severity: warning
+          service: metrics
+        annotations:
+          summary: "Metrics service high error rate"
+          description: "Metrics service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+
+      - alert: MetricsIngestionLatency
+        expr: histogram_quantile(0.95, rate(metrics_ingestion_duration_seconds_bucket[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: metrics
+        annotations:
+          summary: "Metrics service high ingestion latency"
+          description: "Metrics service 95th percentile ingestion latency is {{ $value }}s"
+
+      - alert: MetricsSeriesLimitExceeded
+        expr: metrics_series_total > 1000000
+        for: 2m
+        labels:
+          severity: warning
+          service: metrics
+        annotations:
+          summary: "Metrics service series limit exceeded"
+          description: "Metrics service has {{ $value }} active series, exceeding the limit"
+
+  - name: infrastructure_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service is down"
+          description: "Service {{ $labels.job }} is down"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+      - alert: RedisConnectionFailure
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis connection failure"
+          description: "Redis is not accessible"
+
+      - alert: PostgreSQLConnectionFailure
+        expr: postgres_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL connection failure"
+          description: "PostgreSQL is not accessible"
+
+      - alert: KafkaConnectionFailure
+        expr: kafka_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka connection failure"
+          description: "Kafka is not accessible"
+
+  - name: business_alerts
+    rules:
+      - alert: HighRequestVolume
+        expr: rate(gateway_requests_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "High request volume"
+          description: "Request rate is {{ $value }} requests/second"
+
+      - alert: UnusualErrorPattern
+        expr: rate(gateway_requests_total{status=~"4.."}[5m]) > rate(gateway_requests_total[5m]) * 0.3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual error pattern"
+          description: "4xx error rate is {{ $value | humanizePercentage }} of total requests"
+
+      - alert: ServiceDependencyFailure
+        expr: gateway_circuit_breaker_state == 1 or auth_circuit_breaker_state == 1 or entitlements_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service dependency failure"
+          description: "Circuit breaker is open for {{ $labels.service }}"

@@ -1,6 +1,461 @@
-## Monitoring Stack (Prometheus + Grafana)
+## Production Monitoring and Alerting Configuration
 ##
-## This manifest deploys Prometheus and Grafana for observability.
+## This manifest defines monitoring, alerting, and observability components
+## for the 254Carbon Access Layer production deployment.
+
+---
+## Prometheus Server Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: 254carbon-access
+  labels:
+    app: prometheus
+    component: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: '254carbon-production'
+        environment: 'production'
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager-service:9093
+    
+    scrape_configs:
+      # Prometheus itself
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+      
+      # Gateway Service
+      - job_name: 'gateway'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - 254carbon-access
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: gateway-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        scrape_interval: 10s
+        metrics_path: '/metrics'
+      
+      # Streaming Service
+      - job_name: 'streaming'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - 254carbon-access
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: streaming-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        scrape_interval: 10s
+        metrics_path: '/metrics'
+      
+      # Auth Service
+      - job_name: 'auth'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - 254carbon-access
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: auth-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        scrape_interval: 10s
+        metrics_path: '/metrics'
+      
+      # Entitlements Service
+      - job_name: 'entitlements'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - 254carbon-access
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: entitlements-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        scrape_interval: 10s
+        metrics_path: '/metrics'
+      
+      # Metrics Service
+      - job_name: 'metrics'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - 254carbon-access
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: metrics-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: http
+        scrape_interval: 10s
+        metrics_path: '/metrics'
+      
+      # Kubernetes API Server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+          - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: default;kubernetes;https
+      
+      # Kubernetes Nodes
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${1}/proxy/metrics
+      
+      # Kubernetes Pods
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: kubernetes_namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: kubernetes_pod_name
+
+---
+## Prometheus Alert Rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: 254carbon-access
+  labels:
+    app: prometheus
+    component: monitoring
+data:
+  access-layer-alerts.yml: |
+    groups:
+      - name: access-layer-alerts
+        rules:
+          # Gateway Service Alerts
+          - alert: GatewayHighErrorRate
+            expr: rate(gateway_requests_total{status=~"5.."}[5m]) / rate(gateway_requests_total[5m]) > 0.05
+            for: 2m
+            labels:
+              severity: warning
+              service: gateway
+            annotations:
+              summary: "Gateway service high error rate"
+              description: "Gateway service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+          
+          - alert: GatewayHighLatency
+            expr: histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m])) > 1
+            for: 5m
+            labels:
+              severity: warning
+              service: gateway
+            annotations:
+              summary: "Gateway service high latency"
+              description: "Gateway service 95th percentile latency is {{ $value }}s"
+          
+          - alert: GatewayCircuitBreakerOpen
+            expr: gateway_circuit_breaker_state == 1
+            for: 1m
+            labels:
+              severity: critical
+              service: gateway
+            annotations:
+              summary: "Gateway circuit breaker is open"
+              description: "Gateway circuit breaker is open for {{ $labels.service }}"
+          
+          # Streaming Service Alerts
+          - alert: StreamingHighConnectionCount
+            expr: streaming_websocket_connections_total > 10000
+            for: 5m
+            labels:
+              severity: warning
+              service: streaming
+            annotations:
+              summary: "Streaming service high connection count"
+              description: "Streaming service has {{ $value }} active WebSocket connections"
+          
+          - alert: StreamingMessageProcessingLatency
+            expr: histogram_quantile(0.95, rate(streaming_message_processing_duration_seconds_bucket[5m])) > 0.5
+            for: 5m
+            labels:
+              severity: warning
+              service: streaming
+            annotations:
+              summary: "Streaming service high message processing latency"
+              description: "Streaming service 95th percentile message processing latency is {{ $value }}s"
+          
+          # Auth Service Alerts
+          - alert: AuthHighErrorRate
+            expr: rate(auth_requests_total{status=~"5.."}[5m]) / rate(auth_requests_total[5m]) > 0.02
+            for: 2m
+            labels:
+              severity: warning
+              service: auth
+            annotations:
+              summary: "Auth service high error rate"
+              description: "Auth service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+          
+          - alert: AuthJWKSFetchFailure
+            expr: rate(auth_jwks_fetch_failures_total[5m]) > 0
+            for: 1m
+            labels:
+              severity: critical
+              service: auth
+            annotations:
+              summary: "Auth service JWKS fetch failures"
+              description: "Auth service failed to fetch JWKS {{ $value }} times in the last 5 minutes"
+          
+          # Entitlements Service Alerts
+          - alert: EntitlementsHighErrorRate
+            expr: rate(entitlements_requests_total{status=~"5.."}[5m]) / rate(entitlements_requests_total[5m]) > 0.02
+            for: 2m
+            labels:
+              severity: warning
+              service: entitlements
+            annotations:
+              summary: "Entitlements service high error rate"
+              description: "Entitlements service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+          
+          # Metrics Service Alerts
+          - alert: MetricsHighErrorRate
+            expr: rate(metrics_requests_total{status=~"5.."}[5m]) / rate(metrics_requests_total[5m]) > 0.02
+            for: 2m
+            labels:
+              severity: warning
+              service: metrics
+            annotations:
+              summary: "Metrics service high error rate"
+              description: "Metrics service error rate is {{ $value | humanizePercentage }} for the last 5 minutes"
+          
+          # Infrastructure Alerts
+          - alert: ServiceDown
+            expr: up == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Service is down"
+              description: "Service {{ $labels.job }} is down"
+          
+          - alert: HighMemoryUsage
+            expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High memory usage"
+              description: "Memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+          
+          - alert: HighCPUUsage
+            expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High CPU usage"
+              description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+          
+          - alert: DiskSpaceLow
+            expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Low disk space"
+              description: "Disk space is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+---
+## Alertmanager Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: 254carbon-access
+  labels:
+    app: alertmanager
+    component: monitoring
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.company.com:587'
+      smtp_from: 'alerts@254carbon.com'
+      smtp_auth_username: 'alerts@254carbon.com'
+      smtp_auth_password: 'alert_password'
+    
+    route:
+      group_by: ['alertname', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'default'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+        group_wait: 5s
+        repeat_interval: 30m
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+        group_wait: 10s
+        repeat_interval: 1h
+    
+    receivers:
+    - name: 'default'
+      email_configs:
+      - to: 'devops@254carbon.com'
+        subject: '[254Carbon] Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+          {{ end }}
+    
+    - name: 'critical-alerts'
+      email_configs:
+      - to: 'oncall@254carbon.com'
+        subject: '[CRITICAL] 254Carbon Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          CRITICAL ALERT: {{ .GroupLabels.alertname }}
+          {{ range .Alerts }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+          {{ end }}
+      slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts-critical'
+        title: 'Critical Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          {{ .Annotations.description }}
+          {{ end }}
+    
+    - name: 'warning-alerts'
+      email_configs:
+      - to: 'devops@254carbon.com'
+        subject: '[WARNING] 254Carbon Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          WARNING: {{ .GroupLabels.alertname }}
+          {{ range .Alerts }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+          {{ end }}
+      slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts-warning'
+        title: 'Warning Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+---
+## Grafana Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: 254carbon-access
+  labels:
+    app: grafana
+    component: monitoring
+data:
+  grafana.ini: |
+    [server]
+    root_url = https://grafana.254carbon.com/
+    
+    [security]
+    admin_user = admin
+    admin_password = grafana_admin_password
+    
+    [auth.anonymous]
+    enabled = true
+    org_name = 254Carbon
+    role = Viewer
+    
+    [datasources]
+    datasources.yaml: |
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus-service:9090
+        isDefault: true
+        editable: true
+    
+    [dashboards]
+    default_home_dashboard_path = /var/lib/grafana/dashboards/home.json
+    
+    [log]
+    mode = console
+    level = info
+
+---
+## Prometheus Server Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +463,7 @@ metadata:
   namespace: 254carbon-access
   labels:
     app: prometheus
-    service: prometheus
+    component: monitoring
 spec:
   replicas: 1
   selector:
@@ -18,40 +473,47 @@ spec:
     metadata:
       labels:
         app: prometheus
-        service: prometheus
     spec:
+      serviceAccountName: prometheus-service-account
       containers:
       - name: prometheus
-        image: prom/prometheus:latest
+        image: prom/prometheus:v2.45.0
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.enable-lifecycle'
         ports:
         - containerPort: 9090
-        args:
-        - '--config.file=/etc/prometheus/prometheus.yml'
-        - '--storage.tsdb.path=/prometheus'
-        - '--web.console.libraries=/etc/prometheus/console_libraries'
-        - '--web.console.templates=/etc/prometheus/consoles'
-        - '--storage.tsdb.retention.time=200h'
-        - '--web.enable-lifecycle'
         resources:
           requests:
-            memory: "512Mi"
+            memory: "1Gi"
             cpu: "500m"
           limits:
-            memory: "1Gi"
+            memory: "2Gi"
             cpu: "1000m"
         volumeMounts:
         - name: prometheus-config
           mountPath: /etc/prometheus
-        - name: prometheus-data
+        - name: prometheus-rules
+          mountPath: /etc/prometheus/rules
+        - name: prometheus-storage
           mountPath: /prometheus
       volumes:
       - name: prometheus-config
         configMap:
           name: prometheus-config
-      - name: prometheus-data
+      - name: prometheus-rules
+        configMap:
+          name: prometheus-rules
+      - name: prometheus-storage
         persistentVolumeClaim:
-          claimName: prometheus-pvc
+          claimName: prometheus-storage
+
 ---
+## Prometheus Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -59,6 +521,7 @@ metadata:
   namespace: 254carbon-access
   labels:
     app: prometheus
+    component: monitoring
 spec:
   selector:
     app: prometheus
@@ -66,80 +529,75 @@ spec:
   - port: 9090
     targetPort: 9090
   type: ClusterIP
+
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
+## Alertmanager Deployment
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: prometheus-pvc
+  name: alertmanager-deployment
   namespace: 254carbon-access
+  labels:
+    app: alertmanager
+    component: monitoring
 spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:v0.25.0
+        args:
+          - '--config.file=/etc/alertmanager/alertmanager.yml'
+          - '--storage.path=/alertmanager'
+        ports:
+        - containerPort: 9093
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: alertmanager-config
+          mountPath: /etc/alertmanager
+        - name: alertmanager-storage
+          mountPath: /alertmanager
+      volumes:
+      - name: alertmanager-config
+        configMap:
+          name: alertmanager-config
+      - name: alertmanager-storage
+        persistentVolumeClaim:
+          claimName: alertmanager-storage
+
 ---
+## Alertmanager Service
 apiVersion: v1
-kind: ConfigMap
+kind: Service
 metadata:
-  name: prometheus-config
+  name: alertmanager-service
   namespace: 254carbon-access
-data:
-  prometheus.yml: |
-    global:
-      scrape_interval: 15s
-      evaluation_interval: 15s
+  labels:
+    app: alertmanager
+    component: monitoring
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - port: 9093
+    targetPort: 9093
+  type: ClusterIP
 
-    scrape_configs:
-      - job_name: 'prometheus'
-        static_configs:
-          - targets: ['localhost:9090']
-
-      - job_name: 'gateway-service'
-        static_configs:
-          - targets: ['gateway-service:8000']
-        metrics_path: '/metrics'
-        scrape_interval: 10s
-
-      - job_name: 'streaming-service'
-        static_configs:
-          - targets: ['streaming-service:8001']
-        metrics_path: '/metrics'
-        scrape_interval: 10s
-
-      - job_name: 'auth-service'
-        static_configs:
-          - targets: ['auth-service:8010']
-        metrics_path: '/metrics'
-        scrape_interval: 10s
-
-      - job_name: 'entitlements-service'
-        static_configs:
-          - targets: ['entitlements-service:8011']
-        metrics_path: '/metrics'
-        scrape_interval: 10s
-
-      - job_name: 'metrics-service'
-        static_configs:
-          - targets: ['metrics-service:8012']
-        metrics_path: '/metrics'
-        scrape_interval: 10s
-
-      - job_name: 'redis'
-        static_configs:
-          - targets: ['redis-service:6379']
-        scrape_interval: 30s
-
-      - job_name: 'postgres'
-        static_configs:
-          - targets: ['postgres-service:5432']
-        scrape_interval: 30s
-
-      - job_name: 'kafka'
-        static_configs:
-          - targets: ['kafka-service:9092']
-        scrape_interval: 30s
 ---
+## Grafana Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -147,7 +605,7 @@ metadata:
   namespace: 254carbon-access
   labels:
     app: grafana
-    service: grafana
+    component: monitoring
 spec:
   replicas: 1
   selector:
@@ -157,44 +615,39 @@ spec:
     metadata:
       labels:
         app: grafana
-        service: grafana
     spec:
       containers:
       - name: grafana
-        image: grafana/grafana:latest
+        image: grafana/grafana:10.0.0
         ports:
         - containerPort: 3000
-        env:
-        - name: GF_SECURITY_ADMIN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: grafana-secret
-              key: admin-password
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
-          limits:
             memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
             cpu: "500m"
         volumeMounts:
-        - name: grafana-data
+        - name: grafana-config
+          mountPath: /etc/grafana
+        - name: grafana-storage
           mountPath: /var/lib/grafana
         - name: grafana-dashboards
-          mountPath: /etc/grafana/provisioning/dashboards
-        - name: grafana-datasources
-          mountPath: /etc/grafana/provisioning/datasources
+          mountPath: /var/lib/grafana/dashboards
       volumes:
-      - name: grafana-data
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+      - name: grafana-storage
         persistentVolumeClaim:
-          claimName: grafana-pvc
+          claimName: grafana-storage
       - name: grafana-dashboards
         configMap:
           name: grafana-dashboards
-      - name: grafana-datasources
-        configMap:
-          name: grafana-datasources
+
 ---
+## Grafana Service
 apiVersion: v1
 kind: Service
 metadata:
@@ -202,6 +655,7 @@ metadata:
   namespace: 254carbon-access
   labels:
     app: grafana
+    component: monitoring
 spec:
   selector:
     app: grafana
@@ -209,59 +663,103 @@ spec:
   - port: 3000
     targetPort: 3000
   type: ClusterIP
+
+---
+## Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-storage
+  namespace: 254carbon-access
+  labels:
+    app: prometheus
+    component: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: grafana-pvc
+  name: alertmanager-storage
   namespace: 254carbon-access
+  labels:
+    app: alertmanager
+    component: monitoring
 spec:
   accessModes:
-  - ReadWriteOnce
+    - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi
+      storage: 10Gi
+  storageClassName: fast-ssd
+
 ---
 apiVersion: v1
-kind: Secret
+kind: PersistentVolumeClaim
 metadata:
-  name: grafana-secret
+  name: grafana-storage
   namespace: 254carbon-access
-type: Opaque
-data:
-  admin-password: YWRtaW4xMjM= # base64 encoded "admin123"
+  labels:
+    app: grafana
+    component: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: fast-ssd
+
 ---
+## Service Account for Monitoring
 apiVersion: v1
-kind: ConfigMap
+kind: ServiceAccount
 metadata:
-  name: grafana-datasources
+  name: prometheus-service-account
   namespace: 254carbon-access
-data:
-  prometheus.yml: |
-    apiVersion: 1
-    datasources:
-      - name: Prometheus
-        type: prometheus
-        access: proxy
-        url: http://prometheus-service:9090
-        isDefault: true
-        editable: true
+  labels:
+    app: prometheus
+    component: monitoring
+
 ---
-apiVersion: v1
-kind: ConfigMap
+## RBAC for Monitoring
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: grafana-dashboards
+  name: prometheus-cluster-role
+rules:
+- apiGroups: [""]
+  resources:
+    - nodes
+    - nodes/proxy
+    - services
+    - endpoints
+    - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+    - extensions
+  resources:
+    - ingresses
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: prometheus-service-account
   namespace: 254carbon-access
-data:
-  dashboard.yml: |
-    apiVersion: 1
-    providers:
-      - name: '254Carbon Access Layer'
-        orgId: 1
-        folder: ''
-        type: file
-        disableDeletion: false
-        updateIntervalSeconds: 10
-        allowUiUpdates: true
-        options:
-          path: /etc/grafana/provisioning/dashboards

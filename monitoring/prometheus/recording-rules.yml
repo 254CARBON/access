@@ -1,0 +1,197 @@
+groups:
+  - name: gateway_recording_rules
+    rules:
+      - record: gateway:request_rate_5m
+        expr: rate(gateway_requests_total[5m])
+        labels:
+          service: gateway
+
+      - record: gateway:error_rate_5m
+        expr: rate(gateway_requests_total{status=~"5.."}[5m]) / rate(gateway_requests_total[5m])
+        labels:
+          service: gateway
+
+      - record: gateway:response_time_95p_5m
+        expr: histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m]))
+        labels:
+          service: gateway
+
+      - record: gateway:response_time_50p_5m
+        expr: histogram_quantile(0.50, rate(gateway_request_duration_seconds_bucket[5m]))
+        labels:
+          service: gateway
+
+      - record: gateway:cache_hit_rate_5m
+        expr: rate(gateway_cache_hits_total[5m]) / (rate(gateway_cache_hits_total[5m]) + rate(gateway_cache_misses_total[5m]))
+        labels:
+          service: gateway
+
+  - name: streaming_recording_rules
+    rules:
+      - record: streaming:connection_count
+        expr: streaming_websocket_connections_total + streaming_sse_connections_total
+        labels:
+          service: streaming
+
+      - record: streaming:message_throughput_5m
+        expr: rate(streaming_messages_sent_total[5m]) + rate(streaming_messages_received_total[5m])
+        labels:
+          service: streaming
+
+      - record: streaming:message_processing_latency_95p_5m
+        expr: histogram_quantile(0.95, rate(streaming_message_processing_duration_seconds_bucket[5m]))
+        labels:
+          service: streaming
+
+      - record: streaming:kafka_message_rate_5m
+        expr: rate(streaming_kafka_messages_consumed_total[5m]) + rate(streaming_kafka_messages_produced_total[5m])
+        labels:
+          service: streaming
+
+  - name: auth_recording_rules
+    rules:
+      - record: auth:request_rate_5m
+        expr: rate(auth_requests_total[5m])
+        labels:
+          service: auth
+
+      - record: auth:error_rate_5m
+        expr: rate(auth_requests_total{status=~"5.."}[5m]) / rate(auth_requests_total[5m])
+        labels:
+          service: auth
+
+      - record: auth:token_validation_latency_95p_5m
+        expr: histogram_quantile(0.95, rate(auth_token_validation_duration_seconds_bucket[5m]))
+        labels:
+          service: auth
+
+      - record: auth:jwks_fetch_success_rate_5m
+        expr: rate(auth_jwks_fetch_successes_total[5m]) / (rate(auth_jwks_fetch_successes_total[5m]) + rate(auth_jwks_fetch_failures_total[5m]))
+        labels:
+          service: auth
+
+  - name: entitlements_recording_rules
+    rules:
+      - record: entitlements:request_rate_5m
+        expr: rate(entitlements_requests_total[5m])
+        labels:
+          service: entitlements
+
+      - record: entitlements:error_rate_5m
+        expr: rate(entitlements_requests_total{status=~"5.."}[5m]) / rate(entitlements_requests_total[5m])
+        labels:
+          service: entitlements
+
+      - record: entitlements:rule_evaluation_latency_95p_5m
+        expr: histogram_quantile(0.95, rate(entitlements_rule_evaluation_duration_seconds_bucket[5m]))
+        labels:
+          service: entitlements
+
+      - record: entitlements:cache_hit_rate_5m
+        expr: rate(entitlements_cache_hits_total[5m]) / (rate(entitlements_cache_hits_total[5m]) + rate(entitlements_cache_misses_total[5m]))
+        labels:
+          service: entitlements
+
+  - name: metrics_recording_rules
+    rules:
+      - record: metrics:request_rate_5m
+        expr: rate(metrics_requests_total[5m])
+        labels:
+          service: metrics
+
+      - record: metrics:error_rate_5m
+        expr: rate(metrics_requests_total{status=~"5.."}[5m]) / rate(metrics_requests_total[5m])
+        labels:
+          service: metrics
+
+      - record: metrics:ingestion_latency_95p_5m
+        expr: histogram_quantile(0.95, rate(metrics_ingestion_duration_seconds_bucket[5m]))
+        labels:
+          service: metrics
+
+      - record: metrics:collection_rate_5m
+        expr: rate(metrics_collected_total[5m])
+        labels:
+          service: metrics
+
+      - record: metrics:export_rate_5m
+        expr: rate(metrics_exported_total[5m])
+        labels:
+          service: metrics
+
+  - name: system_recording_rules
+    rules:
+      - record: system:total_request_rate_5m
+        expr: rate(gateway_requests_total[5m]) + rate(auth_requests_total[5m]) + rate(entitlements_requests_total[5m]) + rate(metrics_requests_total[5m])
+        labels:
+          system: access-layer
+
+      - record: system:total_error_rate_5m
+        expr: (rate(gateway_requests_total{status=~"5.."}[5m]) + rate(auth_requests_total{status=~"5.."}[5m]) + rate(entitlements_requests_total{status=~"5.."}[5m]) + rate(metrics_requests_total{status=~"5.."}[5m])) / (rate(gateway_requests_total[5m]) + rate(auth_requests_total[5m]) + rate(entitlements_requests_total[5m]) + rate(metrics_requests_total[5m]))
+        labels:
+          system: access-layer
+
+      - record: system:avg_response_time_95p_5m
+        expr: (histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m])) + histogram_quantile(0.95, rate(auth_request_duration_seconds_bucket[5m])) + histogram_quantile(0.95, rate(entitlements_request_duration_seconds_bucket[5m])) + histogram_quantile(0.95, rate(metrics_request_duration_seconds_bucket[5m]))) / 4
+        labels:
+          system: access-layer
+
+      - record: system:circuit_breaker_open_count
+        expr: gateway_circuit_breaker_state + auth_circuit_breaker_state + entitlements_circuit_breaker_state + metrics_circuit_breaker_state
+        labels:
+          system: access-layer
+
+  - name: sli_recording_rules
+    rules:
+      - record: sli:availability_5m
+        expr: (rate(gateway_requests_total{status!~"5.."}[5m]) + rate(auth_requests_total{status!~"5.."}[5m]) + rate(entitlements_requests_total{status!~"5.."}[5m]) + rate(metrics_requests_total{status!~"5.."}[5m])) / (rate(gateway_requests_total[5m]) + rate(auth_requests_total[5m]) + rate(entitlements_requests_total[5m]) + rate(metrics_requests_total[5m]))
+        labels:
+          sli: availability
+
+      - record: sli:latency_95p_5m
+        expr: histogram_quantile(0.95, rate(gateway_request_duration_seconds_bucket[5m]))
+        labels:
+          sli: latency
+          service: gateway
+
+      - record: sli:latency_95p_5m
+        expr: histogram_quantile(0.95, rate(auth_request_duration_seconds_bucket[5m]))
+        labels:
+          sli: latency
+          service: auth
+
+      - record: sli:latency_95p_5m
+        expr: histogram_quantile(0.95, rate(entitlements_request_duration_seconds_bucket[5m]))
+        labels:
+          sli: latency
+          service: entitlements
+
+      - record: sli:latency_95p_5m
+        expr: histogram_quantile(0.95, rate(metrics_request_duration_seconds_bucket[5m]))
+        labels:
+          sli: latency
+          service: metrics
+
+      - record: sli:throughput_5m
+        expr: rate(gateway_requests_total[5m])
+        labels:
+          sli: throughput
+          service: gateway
+
+      - record: sli:throughput_5m
+        expr: rate(auth_requests_total[5m])
+        labels:
+          sli: throughput
+          service: auth
+
+      - record: sli:throughput_5m
+        expr: rate(entitlements_requests_total[5m])
+        labels:
+          sli: throughput
+          service: entitlements
+
+      - record: sli:throughput_5m
+        expr: rate(metrics_requests_total[5m])
+        labels:
+          sli: throughput
+          service: metrics
