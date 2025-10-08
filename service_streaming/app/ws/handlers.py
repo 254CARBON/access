@@ -4,7 +4,7 @@ WebSocket message handlers for Streaming Service.
 
 import json
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable, Awaitable
 from dataclasses import dataclass
 import sys
 import os
@@ -32,10 +32,18 @@ class WebSocketMessageHandler:
     def __init__(
         self,
         connection_manager: WebSocketConnectionManager,
-        kafka_message_handler: callable
+        kafka_message_handler: Callable[[KafkaMessage], None],
+        subscription_manager,
+        entitlement_checker: Callable[[Any, str], Awaitable[bool]],
+        ensure_topic_subscription: Callable[[str], Awaitable[None]],
+        topic_registry: Dict[str, Dict[str, Any]]
     ):
         self.connection_manager = connection_manager
         self.kafka_message_handler = kafka_message_handler
+        self.subscription_manager = subscription_manager
+        self.entitlement_checker = entitlement_checker
+        self.ensure_topic_subscription = ensure_topic_subscription
+        self.topic_registry = topic_registry
         self.logger = get_logger("streaming.ws.handler")
     
     async def handle_message(
@@ -146,10 +154,13 @@ class WebSocketMessageHandler:
                     failed_topics.append({"topic": topic, "error": "INVALID_TOPIC_FORMAT"})
                     continue
                 
-                # Check entitlements (simplified for now)
+                # Check entitlements
                 if not await self._check_topic_entitlements(connection, topic):
                     failed_topics.append({"topic": topic, "error": "ENTITLEMENT_DENIED"})
                     continue
+
+                # Ensure Kafka subscription is active for topic
+                await self.ensure_topic_subscription(topic)
                 
                 # Subscribe
                 filters = data.get("filters", {}).get(topic, {})
@@ -158,6 +169,13 @@ class WebSocketMessageHandler:
                 )
                 
                 if success:
+                    await self.subscription_manager.create_subscription(
+                        connection_id=connection_id,
+                        topic=topic,
+                        filters=filters,
+                        user_id=connection.user_id,
+                        tenant_id=connection.tenant_id
+                    )
                     subscribed_topics.append(topic)
                 else:
                     failed_topics.append({"topic": topic, "error": "SUBSCRIPTION_FAILED"})
@@ -191,6 +209,7 @@ class WebSocketMessageHandler:
         for topic in topics:
             success = await self.connection_manager.unsubscribe_from_topic(connection_id, topic)
             if success:
+                await self.subscription_manager.remove_subscription_by_connection_topic(connection_id, topic)
                 unsubscribed_topics.append(topic)
             else:
                 failed_topics.append({"topic": topic, "error": "UNSUBSCRIBE_FAILED"})
@@ -262,10 +281,8 @@ class WebSocketMessageHandler:
         }
     
     def _validate_topic(self, topic: str) -> bool:
-        """Validate topic format."""
-        # Basic validation - should be in format: domain.event.version
-        parts = topic.split('.')
-        return len(parts) >= 3 and parts[0] == "254carbon"
+        """Validate topic format using registry."""
+        return topic in self.topic_registry
     
     async def _check_topic_entitlements(
         self,
@@ -273,15 +290,27 @@ class WebSocketMessageHandler:
         topic: str
     ) -> bool:
         """Check if connection has entitlements for topic."""
-        # Simplified entitlement check
-        # In real implementation, this would call the Entitlements Service
-        
-        if not connection.user_id:
+        if not connection.user_id or not connection.tenant_id:
             return False
-        
-        # For now, allow all topics for authenticated users
-        # TODO: Implement proper entitlement checking
-        return True
+
+        try:
+            return await self.entitlement_checker(connection, topic)
+        except AccessLayerException as exc:
+            self.logger.warning(
+                "Entitlement check failed",
+                connection_id=connection.connection_id,
+                topic=topic,
+                error=str(exc)
+            )
+            return False
+        except Exception as exc:
+            self.logger.error(
+                "Unexpected entitlement check error",
+                connection_id=connection.connection_id,
+                topic=topic,
+                error=str(exc)
+            )
+            return False
     
     async def handle_kafka_message(self, kafka_message: KafkaMessage):
         """Handle incoming Kafka message and route to WebSocket connections."""

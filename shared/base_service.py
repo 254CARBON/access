@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
+import asyncio
 import time
 import sys
 import os
@@ -25,6 +26,7 @@ class BaseService:
     
     def __init__(self, service_name: str, port: int):
         self.service_name = service_name
+        self.name = service_name
         self.port = port
         self.config = get_config(service_name, port)
         self.logger = get_logger(service_name)
@@ -110,7 +112,11 @@ class BaseService:
             """Health check endpoint."""
             try:
                 # Check dependencies
-                dependencies = await self._check_dependencies()
+                dependency_result = self._check_dependencies()
+                if asyncio.iscoroutine(dependency_result):
+                    dependencies = await dependency_result
+                else:
+                    dependencies = dependency_result
                 
                 # Record health check
                 self.metrics.record_health_check("ok")

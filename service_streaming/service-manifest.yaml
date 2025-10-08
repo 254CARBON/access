@@ -9,6 +9,7 @@ api_contracts:
 events_in:
   - pricing.curve.updates.v1
   - market.data.updates.v1
+  - served.market.latest_prices.v1
 events_out:
   - metrics.connection.count.v1
 dependencies:

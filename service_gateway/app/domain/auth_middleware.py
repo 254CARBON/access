@@ -32,7 +32,14 @@ class AuthMiddleware:
         # Check for API key first
         api_key = request.headers.get("X-API-Key")
         if api_key:
-            return await self._authenticate_with_api_key(api_key)
+            user_info = await self._authenticate_with_api_key(api_key)
+            
+            try:
+                request.state.user_info = user_info
+            except AttributeError:
+                pass
+            
+            return user_info
         
         # Fall back to JWT token authentication
         auth_header = request.headers.get("Authorization")
@@ -60,6 +67,12 @@ class AuthMiddleware:
                 user_id=user_info.get("user_id"),
                 tenant_id=user_info.get("tenant_id")
             )
+            
+            try:
+                request.state.user_info = user_info
+            except AttributeError:
+                # FastAPI ensures state exists, but guard defensively
+                pass
             
             return user_info
             
@@ -99,7 +112,7 @@ class AuthMiddleware:
             api_key=api_key[:8] + "...",
             tenant_id=api_key_info["tenant_id"]
         )
-        
+
         return user_info
     
     async def authorize_request(self, user_info: Dict[str, Any], action: str,

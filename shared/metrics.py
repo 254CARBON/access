@@ -2,11 +2,59 @@
 Shared metrics configuration for 254Carbon Access Layer.
 """
 
-from prometheus_client import Counter, Histogram, Gauge, Info, Summary, start_http_server, CollectorRegistry
+try:  # pragma: no cover - allow running without prometheus_client locally/tests
+    from prometheus_client import Counter, Histogram, Gauge, Info, Summary, start_http_server, CollectorRegistry  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    class _DummyMetric:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def labels(self, *args, **kwargs):
+            return self
+
+        def info(self, *args, **kwargs):
+            return None
+
+        def observe(self, *args, **kwargs):
+            return None
+
+        def inc(self, *args, **kwargs):
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+    def Counter(*args, **kwargs):  # type: ignore
+        return _DummyMetric()
+
+    def Histogram(*args, **kwargs):  # type: ignore
+        return _DummyMetric()
+
+    def Gauge(*args, **kwargs):  # type: ignore
+        return _DummyMetric()
+
+    def Info(*args, **kwargs):  # type: ignore
+        metric = _DummyMetric()
+
+        def _info(values):
+            return None
+
+        metric.info = _info  # type: ignore
+        return metric
+
+    def Summary(*args, **kwargs):  # type: ignore
+        return _DummyMetric()
+
+    class CollectorRegistry:  # type: ignore
+        pass
+
+    def start_http_server(*args, **kwargs):  # type: ignore
+        return None
 from typing import Dict, Any, Optional, Callable
 import time
 import functools
 import threading
+import asyncio
 from contextlib import contextmanager
 
 
@@ -257,27 +305,50 @@ def get_metrics_collector(service_name: str, registry: Optional[CollectorRegistr
 def measure_time(metric_name: str, collector: Optional[MetricsCollector] = None, **labels):
     """Decorator to measure function execution time."""
     def decorator(func: Callable) -> Callable:
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                start_time = time.time()
+                try:
+                    return await func(*args, **kwargs)
+                finally:
+                    duration = time.time() - start_time
+                    if collector and metric_name in collector._metrics:
+                        collector._metrics[metric_name].labels(**labels).observe(duration)
+
+            return async_wrapper
+
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def sync_wrapper(*args, **kwargs):
             start_time = time.time()
             try:
-                result = func(*args, **kwargs)
-                return result
+                return func(*args, **kwargs)
             finally:
                 duration = time.time() - start_time
                 if collector and metric_name in collector._metrics:
                     collector._metrics[metric_name].labels(**labels).observe(duration)
-        return wrapper
+
+        return sync_wrapper
     return decorator
 
 
 def count_calls(metric_name: str, collector: Optional[MetricsCollector] = None, **labels):
     """Decorator to count function calls."""
     def decorator(func: Callable) -> Callable:
+        if asyncio.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                if collector and metric_name in collector._metrics:
+                    collector._metrics[metric_name].labels(**labels).inc()
+                return await func(*args, **kwargs)
+
+            return async_wrapper
+
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def sync_wrapper(*args, **kwargs):
             if collector and metric_name in collector._metrics:
                 collector._metrics[metric_name].labels(**labels).inc()
             return func(*args, **kwargs)
-        return wrapper
+
+        return sync_wrapper
     return decorator

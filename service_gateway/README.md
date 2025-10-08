@@ -165,6 +165,49 @@ Authorization: Bearer <jwt-token>
 }
 ```
 
+#### Served Latest Price
+```http
+GET /api/v1/served/latest-price/{instrument_id}
+Authorization: Bearer <jwt-token>
+```
+
+Returns the most recent served projection for the requested instrument. Responses are cached per-tenant to minimise load on the projection service.
+
+**Response (200):**
+```json
+{
+  "projection": {
+    "projection_type": "latest_price",
+    "instrument_id": "NG_Q1",
+    "data": {
+      "price": 3.52,
+      "last_updated": "2024-03-21T14:02:33Z"
+    },
+    "tenant_id": "tenant-1",
+    "metadata": {}
+  },
+  "cached": false,
+  "instrument_id": "NG_Q1",
+  "tenant": "tenant-1"
+}
+```
+
+#### Served Curve Snapshot
+```http
+GET /api/v1/served/curve-snapshots/{instrument_id}?horizon=1m
+Authorization: Bearer <jwt-token>
+```
+
+Retrieves a served curve snapshot for a specific horizon (e.g., `1m`, `3m`). Snapshots are cached per tenant/instrument/horizon.
+
+#### Served Custom Projection
+```http
+GET /api/v1/served/custom/{projection_type}/{instrument_id}
+Authorization: Bearer <jwt-token>
+```
+
+Provides access to custom served projections (e.g., `vol_surface`) when entitlements permit. Responses follow the projection contract emitted by the projection service.
+
 #### Products
 ```http
 GET /api/v1/products

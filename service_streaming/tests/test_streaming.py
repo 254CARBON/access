@@ -7,10 +7,10 @@ from fastapi.testclient import TestClient
 import sys
 import os
 
-# Add shared directory to path
+# Add service directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from app.main import create_app
+from service_streaming.app.main import create_app
 
 
 @pytest.fixture

@@ -5,6 +5,7 @@ Unit tests for Streaming main service.
 import pytest
 import json
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
@@ -14,7 +15,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from service_streaming.app.main import StreamingService, create_app
-from shared.errors import AccessLayerException
+from shared.errors import AccessLayerException, AuthorizationError
 
 
 class TestStreamingService:
@@ -60,6 +61,8 @@ class TestStreamingService:
         assert "websocket" in data["capabilities"]
         assert "sse" in data["capabilities"]
         assert "kafka" in data["capabilities"]
+        assert "topics" in data
+        assert "served.market.latest_prices.v1" in data["topics"]
 
     def test_health_endpoint(self, client):
         """Test health endpoint."""
@@ -93,6 +96,7 @@ class TestStreamingService:
         assert "sse" in data
         assert "subscriptions" in data
         assert "kafka" in data
+        assert "supported_topics" in data
 
     def test_service_initialization(self, streaming_service):
         """Test service initialization."""
@@ -104,6 +108,8 @@ class TestStreamingService:
         assert streaming_service.sse_manager is not None
         assert streaming_service.subscription_manager is not None
         assert streaming_service.auth_client is not None
+        assert streaming_service.entitlements_client is not None
+        assert "served.market.latest_prices.v1" in streaming_service.supported_topics
 
     def test_observability_setup(self, streaming_service):
         """Test observability setup."""
@@ -112,6 +118,7 @@ class TestStreamingService:
         assert hasattr(streaming_service.observability, 'log_error')
         assert hasattr(streaming_service.observability, 'log_business_event')
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.AuthClient.verify_websocket_token')
     async def test_authenticate_websocket_success(self, mock_verify, streaming_service, mock_user_info):
         """Test successful WebSocket authentication."""
@@ -125,6 +132,7 @@ class TestStreamingService:
         assert result == mock_user_info
         mock_verify.assert_called_once_with("test-token")
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.AuthClient.verify_websocket_token')
     async def test_authenticate_websocket_invalid_token(self, mock_verify, streaming_service):
         """Test WebSocket authentication with invalid token."""
@@ -138,6 +146,7 @@ class TestStreamingService:
 
         assert exc_info.value.code == "INVALID_TOKEN"
 
+    @pytest.mark.asyncio
     async def test_authenticate_websocket_missing_token(self, streaming_service):
         """Test WebSocket authentication with missing token."""
         with pytest.raises(AccessLayerException) as exc_info:
@@ -145,6 +154,7 @@ class TestStreamingService:
 
         assert exc_info.value.code == "MISSING_TOKEN"
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.AuthClient.verify_token')
     async def test_authenticate_sse_success(self, mock_verify, streaming_service, mock_user_info):
         """Test successful SSE authentication."""
@@ -158,6 +168,7 @@ class TestStreamingService:
         assert result == mock_user_info
         mock_verify.assert_called_once_with("test-token")
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.AuthClient.verify_token')
     async def test_authenticate_sse_invalid_token(self, mock_verify, streaming_service):
         """Test SSE authentication with invalid token."""
@@ -171,6 +182,7 @@ class TestStreamingService:
 
         assert exc_info.value.code == "INVALID_TOKEN"
 
+    @pytest.mark.asyncio
     async def test_authenticate_sse_missing_token(self, streaming_service):
         """Test SSE authentication with missing token."""
         with pytest.raises(AccessLayerException) as exc_info:
@@ -178,6 +190,7 @@ class TestStreamingService:
 
         assert exc_info.value.code == "MISSING_TOKEN"
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.KafkaConsumerManager.is_running')
     @patch('service_streaming.app.main.KafkaProducerManager.is_running')
     async def test_check_dependencies(self, mock_producer_running, mock_consumer_running, streaming_service):
@@ -191,6 +204,7 @@ class TestStreamingService:
         assert dependencies["auth"] == "ok"
         assert dependencies["entitlements"] == "ok"
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.KafkaConsumerManager.is_running')
     async def test_check_dependencies_kafka_error(self, mock_consumer_running, streaming_service):
         """Test dependency checks with Kafka error."""
@@ -202,17 +216,77 @@ class TestStreamingService:
         assert dependencies["auth"] == "ok"
         assert dependencies["entitlements"] == "ok"
 
+    @pytest.mark.asyncio
+    async def test_check_topic_entitlements_allowed(self, streaming_service):
+        """Entitlement check returns True when granted."""
+        connection = MagicMock()
+        connection.user_id = "user-1"
+        connection.tenant_id = "tenant-1"
+        connection.connection_id = "conn-allowed"
+
+        streaming_service.entitlements_client.check_access = AsyncMock(return_value={"allowed": True})
+
+        result = await streaming_service._check_topic_entitlements(connection, "served.market.latest_prices.v1")
+
+        assert result is True
+        streaming_service.entitlements_client.check_access.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_check_topic_entitlements_denied(self, streaming_service):
+        """Entitlement check returns False when denied."""
+        connection = MagicMock()
+        connection.user_id = "user-2"
+        connection.tenant_id = "tenant-2"
+        connection.connection_id = "conn-denied"
+
+        streaming_service.entitlements_client.check_access = AsyncMock(side_effect=AuthorizationError("denied"))
+
+        result = await streaming_service._check_topic_entitlements(connection, "served.market.latest_prices.v1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_ensure_kafka_subscription_subscribes(self, streaming_service):
+        """Ensure Kafka subscription triggers when not already subscribed."""
+        streaming_service.kafka_consumer.get_subscribed_topics = MagicMock(return_value=[])
+        streaming_service.kafka_consumer.subscribe_to_topic = AsyncMock()
+
+        await streaming_service._ensure_kafka_subscription("served.market.latest_prices.v1")
+
+        streaming_service.kafka_consumer.subscribe_to_topic.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_ensure_kafka_subscription_noop_when_present(self, streaming_service):
+        """Ensure Kafka subscription is skipped when already subscribed."""
+        streaming_service.kafka_consumer.get_subscribed_topics = MagicMock(return_value=["served.market.latest_prices.v1"])
+        streaming_service.kafka_consumer.subscribe_to_topic = AsyncMock()
+
+        await streaming_service._ensure_kafka_subscription("served.market.latest_prices.v1")
+
+        streaming_service.kafka_consumer.subscribe_to_topic.assert_not_called()
+
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.KafkaConsumerManager.start')
     @patch('service_streaming.app.main.KafkaProducerManager.start')
     @patch('service_streaming.app.main.WebSocketConnectionManager.start')
-    async def test_start_service(self, mock_ws_start, mock_producer_start, mock_consumer_start, streaming_service):
+    @patch('service_streaming.app.main.StreamingService._ensure_kafka_subscription', new_callable=AsyncMock)
+    async def test_start_service(self, mock_ensure_topic, mock_ws_start, mock_producer_start, mock_consumer_start):
         """Test service start."""
-        await streaming_service.start()
+        service = StreamingService()
+
+        await service.start()
 
         mock_consumer_start.assert_called_once()
         mock_producer_start.assert_called_once()
         mock_ws_start.assert_called_once()
+        assert mock_ensure_topic.await_count == len(service.default_stream_topics)
 
+        with patch.object(service.kafka_consumer, 'stop', new_callable=AsyncMock), \
+             patch.object(service.kafka_producer, 'stop', new_callable=AsyncMock), \
+             patch.object(service.ws_manager, 'stop', new_callable=AsyncMock):
+            await service.stop()
+
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.KafkaConsumerManager.stop')
     @patch('service_streaming.app.main.KafkaProducerManager.stop')
     @patch('service_streaming.app.main.WebSocketConnectionManager.stop')
@@ -224,6 +298,7 @@ class TestStreamingService:
         mock_producer_stop.assert_called_once()
         mock_ws_stop.assert_called_once()
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.StreamingService._authenticate_websocket')
     @patch('service_streaming.app.main.WebSocketConnectionManager.add_connection')
     @patch('service_streaming.app.main.KafkaProducerManager.send_connection_event')
@@ -255,6 +330,7 @@ class TestStreamingService:
                     mock_ws_broadcast.assert_called_once()
                     mock_sse_broadcast.assert_called_once()
 
+    @pytest.mark.asyncio
     @patch('service_streaming.app.main.StreamingService._authenticate_websocket')
     @patch('service_streaming.app.main.WebSocketConnectionManager.add_connection')
     @patch('service_streaming.app.main.KafkaProducerManager.send_connection_event')
@@ -305,33 +381,61 @@ class TestStreamingService:
     def test_sse_subscribe_success(self, mock_subscribe, client):
         """Test SSE subscription success."""
         mock_subscribe.return_value = True
-
-        response = client.post(
-            "/sse/subscribe",
-            params={
-                "connection_id": "connection-123",
-                "topic": "test-topic",
-                "filters": '{"commodity": "oil"}'
-            }
+        service = client.app.state.streaming_service
+        connection_id = "connection-123"
+        service.sse_manager.connections[connection_id] = SimpleNamespace(
+            connection_id=connection_id,
+            user_id="user-123",
+            tenant_id="tenant-1"
         )
+
+        with patch.object(service, '_check_topic_entitlements', new_callable=AsyncMock, return_value=True) as mock_check, \
+             patch.object(service, '_ensure_kafka_subscription', new_callable=AsyncMock) as mock_ensure, \
+             patch.object(service.subscription_manager, 'create_subscription', new_callable=AsyncMock) as mock_create:
+
+            response = client.post(
+                "/sse/subscribe",
+                params={
+                    "connection_id": connection_id,
+                    "topic": "served.market.latest_prices.v1",
+                    "filters": '{"commodity": "oil"}'
+                }
+            )
 
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
-        assert data["topic"] == "test-topic"
+        assert data["topic"] == "served.market.latest_prices.v1"
+        mock_check.assert_awaited_once()
+        mock_ensure.assert_awaited_once_with("served.market.latest_prices.v1")
+        mock_create.assert_awaited_once()
+
+        del service.sse_manager.connections[connection_id]
 
     @patch('service_streaming.app.main.SSEStreamManager.subscribe_to_topic')
     def test_sse_subscribe_failure(self, mock_subscribe, client):
         """Test SSE subscription failure."""
         mock_subscribe.return_value = False
 
-        response = client.post(
-            "/sse/subscribe",
-            params={
-                "connection_id": "connection-123",
-                "topic": "test-topic"
-            }
+        service = client.app.state.streaming_service
+        connection_id = "connection-123"
+        service.sse_manager.connections[connection_id] = SimpleNamespace(
+            connection_id=connection_id,
+            user_id="user-123",
+            tenant_id="tenant-1"
         )
+
+        with patch.object(service, '_check_topic_entitlements', new_callable=AsyncMock, return_value=True), \
+             patch.object(service, '_ensure_kafka_subscription', new_callable=AsyncMock):
+            response = client.post(
+                "/sse/subscribe",
+                params={
+                    "connection_id": connection_id,
+                    "topic": "served.market.latest_prices.v1"
+                }
+            )
+
+        del service.sse_manager.connections[connection_id]
 
         assert response.status_code == 400
         data = response.json()
@@ -343,7 +447,7 @@ class TestStreamingService:
             "/sse/subscribe",
             params={
                 "connection_id": "connection-123",
-                "topic": "test-topic",
+                "topic": "served.market.latest_prices.v1",
                 "filters": "invalid json"
             }
         )
@@ -361,6 +465,7 @@ class TestStreamingService:
     @patch('service_streaming.app.main.KafkaConsumerManager.start')
     @patch('service_streaming.app.main.KafkaProducerManager.start')
     @patch('service_streaming.app.main.WebSocketConnectionManager.start')
+    @pytest.mark.asyncio
     async def test_service_lifecycle(self, mock_ws_start, mock_producer_start, mock_consumer_start, streaming_service):
         """Test complete service lifecycle."""
         # Start service

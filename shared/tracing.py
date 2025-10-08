@@ -1,19 +1,5 @@
-"""
-Shared tracing configuration for 254Carbon Access Layer.
-"""
+"""Tracing utilities with optional OpenTelemetry integration."""
 
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.redis import RedisInstrumentor
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.kafka import KafkaInstrumentor
-from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor
-from opentelemetry.trace import Status, StatusCode
 from typing import Optional, Dict, Any
 import os
 import functools
@@ -21,152 +7,267 @@ import time
 import asyncio
 from contextlib import contextmanager
 
+try:  # pragma: no cover - optional dependency
+    from opentelemetry import trace  # type: ignore
+    from opentelemetry.sdk.trace import TracerProvider  # type: ignore
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter  # type: ignore
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # type: ignore
+    from opentelemetry.sdk.resources import Resource  # type: ignore
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # type: ignore
+    from opentelemetry.instrumentation.redis import RedisInstrumentor  # type: ignore
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor  # type: ignore
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # type: ignore
+    from opentelemetry.instrumentation.kafka import KafkaInstrumentor  # type: ignore
+    from opentelemetry.instrumentation.asyncio import AsyncioInstrumentor  # type: ignore
+    from opentelemetry.trace import Status, StatusCode  # type: ignore
 
-def configure_tracing(service_name: str, otel_exporter: Optional[str] = None, enable_console: bool = False) -> None:
-    """Configure OpenTelemetry tracing for a service."""
-    
-    # Set up resource
-    resource = Resource.create({
-        "service.name": service_name,
-        "service.version": "1.0.0",
-        "service.namespace": "254carbon",
-        "service.instance.id": os.getenv("HOSTNAME", "unknown"),
-        "deployment.environment": os.getenv("ACCESS_ENV", "development")
-    })
-    
-    # Set up tracer provider
-    trace.set_tracer_provider(TracerProvider(resource=resource))
-    tracer = trace.get_tracer(__name__)
-    
-    # Set up span exporters
-    if otel_exporter:
-        otlp_exporter = OTLPSpanExporter(endpoint=otel_exporter)
-        span_processor = BatchSpanProcessor(otlp_exporter)
-        trace.get_tracer_provider().add_span_processor(span_processor)
-    
-    if enable_console or os.getenv("ACCESS_ENV") == "development":
-        console_exporter = ConsoleSpanExporter()
-        console_processor = BatchSpanProcessor(console_exporter)
-        trace.get_tracer_provider().add_span_processor(console_processor)
-    
-    # Instrument libraries
-    FastAPIInstrumentor.instrument()
-    RedisInstrumentor().instrument()
-    SQLAlchemyInstrumentor().instrument()
-    HTTPXClientInstrumentor().instrument()
-    KafkaInstrumentor().instrument()
-    AsyncioInstrumentor().instrument()
+    OTEL_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover
+    trace = None  # type: ignore
+    TracerProvider = object  # type: ignore
+    BatchSpanProcessor = ConsoleSpanExporter = OTLPSpanExporter = Resource = object  # type: ignore
+    FastAPIInstrumentor = RedisInstrumentor = SQLAlchemyInstrumentor = HTTPXClientInstrumentor = KafkaInstrumentor = AsyncioInstrumentor = object  # type: ignore
+
+    class StatusCode:  # type: ignore
+        OK = "OK"
+        ERROR = "ERROR"
+
+    class Status:  # type: ignore
+        def __init__(self, status_code: StatusCode, description: Optional[str] = None):
+            self.status_code = status_code
+            self.description = description
+
+    OTEL_AVAILABLE = False
 
 
-def get_tracer(name: str):
-    """Get a tracer instance."""
-    return trace.get_tracer(name)
+if OTEL_AVAILABLE:
+
+    def configure_tracing(service_name: str, otel_exporter: Optional[str] = None, enable_console: bool = False) -> None:
+        """Configure OpenTelemetry tracing for a service."""
+
+        resource = Resource.create({
+            "service.name": service_name,
+            "service.version": "1.0.0",
+            "service.namespace": "254carbon",
+            "service.instance.id": os.getenv("HOSTNAME", "unknown"),
+            "deployment.environment": os.getenv("ACCESS_ENV", "development")
+        })
+
+        trace.set_tracer_provider(TracerProvider(resource=resource))
+
+        if otel_exporter:
+            otlp_exporter = OTLPSpanExporter(endpoint=otel_exporter)
+            span_processor = BatchSpanProcessor(otlp_exporter)
+            trace.get_tracer_provider().add_span_processor(span_processor)
+
+        if enable_console or os.getenv("ACCESS_ENV") == "development":
+            console_exporter = ConsoleSpanExporter()
+            console_processor = BatchSpanProcessor(console_exporter)
+            trace.get_tracer_provider().add_span_processor(console_processor)
+
+        FastAPIInstrumentor.instrument()
+        RedisInstrumentor().instrument()
+        SQLAlchemyInstrumentor().instrument()
+        HTTPXClientInstrumentor().instrument()
+        KafkaInstrumentor().instrument()
+        AsyncioInstrumentor().instrument()
 
 
-def get_current_span():
-    """Get the current active span."""
-    return trace.get_current_span()
+    def get_tracer(name: str):
+        """Get a tracer instance."""
+        return trace.get_tracer(name)
 
 
-def create_span(name: str, **kwargs):
-    """Create a new span."""
-    tracer = get_tracer(__name__)
-    return tracer.start_span(name, **kwargs)
+    def get_current_span():
+        """Get the current active span."""
+        return trace.get_current_span()
 
 
-@contextmanager
-def trace_operation(operation_name: str, **attributes):
-    """Context manager to trace an operation."""
-    tracer = get_tracer(__name__)
-    with tracer.start_as_current_span(operation_name) as span:
-        # Add attributes to span
-        for key, value in attributes.items():
-            span.set_attribute(key, value)
-        
-        try:
-            yield span
-        except Exception as e:
-            span.set_status(Status(StatusCode.ERROR, str(e)))
-            span.set_attribute("error", True)
-            span.set_attribute("error.message", str(e))
-            raise
+    def create_span(name: str, **kwargs):
+        """Create a new span."""
+        tracer = get_tracer(__name__)
+        return tracer.start_span(name, **kwargs)
 
 
-def trace_function(operation_name: Optional[str] = None, **attributes):
-    """Decorator to trace a function."""
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            name = operation_name or f"{func.__module__}.{func.__name__}"
-            tracer = get_tracer(__name__)
-            
-            with tracer.start_as_current_span(name) as span:
-                # Add function attributes
-                span.set_attribute("function.name", func.__name__)
-                span.set_attribute("function.module", func.__module__)
-                
-                # Add custom attributes
-                for key, value in attributes.items():
-                    span.set_attribute(key, value)
-                
-                try:
-                    result = func(*args, **kwargs)
-                    span.set_status(Status(StatusCode.OK))
-                    return result
-                except Exception as e:
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", str(e))
-                    raise
-        
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            name = operation_name or f"{func.__module__}.{func.__name__}"
-            tracer = get_tracer(__name__)
-            
-            with tracer.start_as_current_span(name) as span:
-                # Add function attributes
-                span.set_attribute("function.name", func.__name__)
-                span.set_attribute("function.module", func.__module__)
-                
-                # Add custom attributes
-                for key, value in attributes.items():
-                    span.set_attribute(key, value)
-                
-                try:
-                    result = await func(*args, **kwargs)
-                    span.set_status(Status(StatusCode.OK))
-                    return result
-                except Exception as e:
-                    span.set_status(Status(StatusCode.ERROR, str(e)))
-                    span.set_attribute("error", True)
-                    span.set_attribute("error.message", str(e))
-                    raise
-        
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper
-        else:
+    @contextmanager
+    def trace_operation(operation_name: str, **attributes):
+        """Context manager to trace an operation."""
+        tracer = get_tracer(__name__)
+        with tracer.start_as_current_span(operation_name) as span:
+            for key, value in attributes.items():
+                span.set_attribute(key, value)
+
+            try:
+                yield span
+            except Exception as exc:  # pragma: no cover - pass through
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.set_attribute("error", True)
+                span.set_attribute("error.message", str(exc))
+                raise
+
+
+    def trace_function(operation_name: Optional[str] = None, **attributes):
+        """Decorator to trace a function."""
+
+        def decorator(func):
+            if asyncio.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs):
+                    name = operation_name or f"{func.__module__}.{func.__name__}"
+                    tracer = get_tracer(__name__)
+
+                    with tracer.start_as_current_span(name) as span:
+                        span.set_attribute("function.name", func.__name__)
+                        span.set_attribute("function.module", func.__module__)
+                        for key, value in attributes.items():
+                            span.set_attribute(key, value)
+
+                        try:
+                            result = await func(*args, **kwargs)
+                            span.set_status(Status(StatusCode.OK))
+                            return result
+                        except Exception as exc:  # pragma: no cover - tracing path
+                            span.set_status(Status(StatusCode.ERROR, str(exc)))
+                            span.set_attribute("error", True)
+                            span.set_attribute("error.message", str(exc))
+                            raise
+
+                return async_wrapper
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                name = operation_name or f"{func.__module__}.{func.__name__}"
+                tracer = get_tracer(__name__)
+
+                with tracer.start_as_current_span(name) as span:
+                    span.set_attribute("function.name", func.__name__)
+                    span.set_attribute("function.module", func.__module__)
+                    for key, value in attributes.items():
+                        span.set_attribute(key, value)
+
+                    try:
+                        result = func(*args, **kwargs)
+                        span.set_status(Status(StatusCode.OK))
+                        return result
+                    except Exception as exc:  # pragma: no cover - tracing path
+                        span.set_status(Status(StatusCode.ERROR, str(exc)))
+                        span.set_attribute("error", True)
+                        span.set_attribute("error.message", str(exc))
+                        raise
+
             return wrapper
-    return decorator
+
+        return decorator
 
 
-def add_span_attributes(**attributes):
-    """Add attributes to the current span."""
-    current_span = get_current_span()
-    if current_span and current_span.is_recording():
-        for key, value in attributes.items():
-            current_span.set_attribute(key, value)
+    def add_span_attributes(**attributes):
+        """Add attributes to the current span."""
+        current_span = get_current_span()
+        if current_span and current_span.is_recording():
+            for key, value in attributes.items():
+                current_span.set_attribute(key, value)
 
 
-def add_span_event(name: str, **attributes):
-    """Add an event to the current span."""
-    current_span = get_current_span()
-    if current_span and current_span.is_recording():
-        current_span.add_event(name, attributes)
+    def add_span_event(name: str, **attributes):
+        """Add an event to the current span."""
+        current_span = get_current_span()
+        if current_span and current_span.is_recording():
+            current_span.add_event(name, attributes)
 
 
-def set_span_status(status_code: StatusCode, description: Optional[str] = None):
-    """Set the status of the current span."""
-    current_span = get_current_span()
-    if current_span and current_span.is_recording():
-        current_span.set_status(Status(status_code, description))
+    def set_span_status(status_code: StatusCode, description: Optional[str] = None):
+        """Set the status of the current span."""
+        current_span = get_current_span()
+        if current_span and current_span.is_recording():
+            current_span.set_status(Status(status_code, description))
+
+
+else:
+
+    class _NoOpSpan:
+        def set_attribute(self, *args, **kwargs):
+            return None
+
+        def set_status(self, *args, **kwargs):
+            return None
+
+        def add_event(self, *args, **kwargs):
+            return None
+
+        def is_recording(self) -> bool:
+            return False
+
+
+    class _NoOpTracer:
+        @contextmanager
+        def start_as_current_span(self, *args, **kwargs):  # pragma: no cover - noop
+            yield _NoOpSpan()
+
+        def start_span(self, *args, **kwargs):  # pragma: no cover - noop
+            return _NoOpSpan()
+
+
+    _GLOBAL_TRACER = _NoOpTracer()
+
+
+    def configure_tracing(service_name: str, otel_exporter: Optional[str] = None, enable_console: bool = False) -> None:
+        """No-op tracing configuration when OpenTelemetry is unavailable."""
+        return None
+
+
+    def get_tracer(name: str):
+        """Return a no-op tracer."""
+        return _GLOBAL_TRACER
+
+
+    def get_current_span():
+        """Return a no-op span."""
+        return _NoOpSpan()
+
+
+    def create_span(name: str, **kwargs):
+        """Return a no-op span."""
+        return _NoOpSpan()
+
+
+    @contextmanager
+    def trace_operation(operation_name: str, **attributes):
+        """Context manager that yields a no-op span."""
+        yield _NoOpSpan()
+
+
+    def trace_function(operation_name: Optional[str] = None, **attributes):
+        """Decorator that returns the original function unchanged."""
+
+        def decorator(func):
+            if asyncio.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs):
+                    return await func(*args, **kwargs)
+
+                return async_wrapper
+
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            return wrapper
+
+        return decorator
+
+
+    def add_span_attributes(**attributes):
+        """No-op when OpenTelemetry is unavailable."""
+        return None
+
+
+    def add_span_event(name: str, **attributes):
+        """No-op when OpenTelemetry is unavailable."""
+        return None
+
+
+    def set_span_status(status_code: StatusCode, description: Optional[str] = None):
+        """No-op when OpenTelemetry is unavailable."""
+        return None

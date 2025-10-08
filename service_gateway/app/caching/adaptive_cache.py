@@ -172,3 +172,13 @@ class AdaptiveCache:
         except Exception as e:
             self.logger.error("Cache clear error", error=str(e))
             return False
+
+    async def warm_cache(self, user_id: str, tenant_id: str) -> bool:
+        """Placeholder for user-specific cache warming."""
+        self.logger.info("Adaptive cache warm cache invoked", user_id=user_id, tenant_id=tenant_id)
+        return True
+
+    async def invalidate_user(self, user_id: str, tenant_id: str) -> bool:
+        """Invalidate cache entries for a user."""
+        pattern = f"*{user_id}*"
+        return await self.clear_pattern(pattern)

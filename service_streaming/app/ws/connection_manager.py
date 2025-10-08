@@ -242,6 +242,14 @@ class WebSocketConnectionManager:
             # Remove failed connection
             await self.remove_connection(connection_id)
             return False
+
+    async def send_to_connection(
+        self,
+        connection_id: str,
+        message: Dict[str, Any]
+    ) -> bool:
+        """Alias for backward compatibility."""
+        return await self.send_message(connection_id, message)
     
     async def broadcast_to_topic(
         self,

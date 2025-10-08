@@ -112,6 +112,10 @@ class CircuitBreaker:
             "recovery_timeout": self.recovery_timeout
         }
 
+    def is_open(self) -> bool:
+        """Check if circuit breaker is in OPEN state."""
+        return self._state == CircuitBreakerState.OPEN
+
 
 class CircuitBreakerOpenException(Exception):
     """Exception raised when circuit breaker is open."""

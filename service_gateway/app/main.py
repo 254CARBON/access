@@ -15,13 +15,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 from shared.base_service import BaseService
 from shared.config import get_config
 from shared.observability import get_observability_manager, observe_function, observe_operation
+from shared.errors import ExternalServiceError
 from adapters.auth_client import AuthClient
 from adapters.entitlements_client import EntitlementsClient
+from adapters.served_data_client import ServedDataClient
 from domain.auth_middleware import AuthMiddleware
 from caching.cache_manager import CacheManager
 from ratelimit.token_bucket import TokenBucketRateLimiter, RateLimitMiddleware
 from shared.circuit_breaker import circuit_breaker_manager
-from fastapi import Depends, HTTPException, Request, Header
+from fastapi import Depends, HTTPException, Request, Header, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 
@@ -32,6 +34,7 @@ class GatewayService(BaseService):
         super().__init__("gateway", 8000)
         self.auth_client = AuthClient(self.config.auth_service_url)
         self.entitlements_client = EntitlementsClient(self.config.entitlements_service_url)
+        self.served_client = ServedDataClient(self.config.projection_service_url)
         self.auth_middleware = AuthMiddleware(self.auth_client, self.entitlements_client)
         self.cache_manager = CacheManager(self.config.redis_url)
         self.rate_limiter = TokenBucketRateLimiter(self.config.redis_url)
@@ -54,6 +57,9 @@ class GatewayService(BaseService):
         
         self._setup_gateway_routes()
         self._setup_observability_middleware()
+
+        # Expose service instance via app state for introspection/testing
+        self.app.state.gateway_service = self
     
     def _setup_observability_middleware(self):
         """Set up observability middleware."""
@@ -585,6 +591,265 @@ class GatewayService(BaseService):
                 "user": user_info["user_id"],
                 "tenant": user_info["tenant_id"]
             }
+
+        @self.app.get("/api/v1/served/latest-price/{instrument_id}")
+        @observe_function("gateway_get_served_latest_price")
+        async def get_served_latest_price(instrument_id: str, request: Request):
+            """Get served latest price projection."""
+            rate_limit_result = await self.rate_limit_middleware.check_request(request, "authenticated")
+            if not rate_limit_result["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Rate limit exceeded",
+                        "current_count": rate_limit_result["current_count"],
+                        "limit": rate_limit_result["limit"],
+                        "reset_in_seconds": rate_limit_result["reset_in_seconds"]
+                    }
+                )
+
+            normalized_instrument = instrument_id.upper()
+
+            try:
+                user_info = await self.auth_middleware.process_request(
+                    request, "read", "market_data"
+                )
+            except Exception as e:
+                self.logger.error("Auth middleware error", error=str(e))
+                raise
+
+            tenant_id = user_info["tenant_id"]
+
+            # Attempt cache read
+            cached_projection = await self.cache_manager.get_served_latest_price(
+                tenant_id, normalized_instrument
+            )
+            if cached_projection:
+                self.observability.log_business_event(
+                    "served_latest_price_cache_hit",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    user_id=user_info["user_id"]
+                )
+                return {
+                    "projection": cached_projection,
+                    "cached": True,
+                    "instrument_id": normalized_instrument,
+                    "tenant": tenant_id
+                }
+
+            # Fetch from served data service
+            try:
+                projection = await self.served_client.get_latest_price(
+                    tenant_id, normalized_instrument
+                )
+            except ExternalServiceError as exc:
+                self.logger.error(
+                    "Served latest price fetch error",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    error=str(exc)
+                )
+                raise HTTPException(status_code=502, detail="Served data unavailable") from None
+
+            if projection is None:
+                raise HTTPException(status_code=404, detail="Served latest price not found")
+
+            await self.cache_manager.set_served_latest_price(
+                tenant_id, normalized_instrument, projection
+            )
+
+            self.observability.log_business_event(
+                "served_latest_price_fetched",
+                instrument_id=normalized_instrument,
+                tenant_id=tenant_id,
+                user_id=user_info["user_id"]
+            )
+
+            return {
+                "projection": projection,
+                "cached": False,
+                "instrument_id": normalized_instrument,
+                "tenant": tenant_id
+            }
+
+        @self.app.get("/api/v1/served/curve-snapshots/{instrument_id}")
+        @observe_function("gateway_get_served_curve_snapshot")
+        async def get_served_curve_snapshot(
+            instrument_id: str,
+            request: Request,
+            horizon: str = Query(..., description="Projection horizon identifier")
+        ):
+            """Get served curve snapshot projection."""
+            rate_limit_result = await self.rate_limit_middleware.check_request(request, "authenticated")
+            if not rate_limit_result["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Rate limit exceeded",
+                        "current_count": rate_limit_result["current_count"],
+                        "limit": rate_limit_result["limit"],
+                        "reset_in_seconds": rate_limit_result["reset_in_seconds"]
+                    }
+                )
+
+            normalized_instrument = instrument_id.upper()
+            normalized_horizon = horizon.lower()
+
+            try:
+                user_info = await self.auth_middleware.process_request(
+                    request, "read", "market_data"
+                )
+            except Exception as e:
+                self.logger.error("Auth middleware error", error=str(e))
+                raise
+
+            tenant_id = user_info["tenant_id"]
+
+            cached_projection = await self.cache_manager.get_served_curve_snapshot(
+                tenant_id, normalized_instrument, normalized_horizon
+            )
+            if cached_projection:
+                self.observability.log_business_event(
+                    "served_curve_snapshot_cache_hit",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    user_id=user_info["user_id"],
+                    horizon=normalized_horizon
+                )
+                return {
+                    "projection": cached_projection,
+                    "cached": True,
+                    "instrument_id": normalized_instrument,
+                    "tenant": tenant_id,
+                    "horizon": normalized_horizon
+                }
+
+            try:
+                projection = await self.served_client.get_curve_snapshot(
+                    tenant_id, normalized_instrument, normalized_horizon
+                )
+            except ExternalServiceError as exc:
+                self.logger.error(
+                    "Served curve snapshot fetch error",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    horizon=normalized_horizon,
+                    error=str(exc)
+                )
+                raise HTTPException(status_code=502, detail="Served data unavailable") from None
+
+            if projection is None:
+                raise HTTPException(status_code=404, detail="Served curve snapshot not found")
+
+            await self.cache_manager.set_served_curve_snapshot(
+                tenant_id, normalized_instrument, normalized_horizon, projection
+            )
+
+            self.observability.log_business_event(
+                "served_curve_snapshot_fetched",
+                instrument_id=normalized_instrument,
+                tenant_id=tenant_id,
+                user_id=user_info["user_id"],
+                horizon=normalized_horizon
+            )
+
+            return {
+                "projection": projection,
+                "cached": False,
+                "instrument_id": normalized_instrument,
+                "tenant": tenant_id,
+                "horizon": normalized_horizon
+            }
+
+        @self.app.get("/api/v1/served/custom/{projection_type}/{instrument_id}")
+        @observe_function("gateway_get_served_custom_projection")
+        async def get_served_custom_projection(
+            projection_type: str,
+            instrument_id: str,
+            request: Request
+        ):
+            """Get served custom projection."""
+            rate_limit_result = await self.rate_limit_middleware.check_request(request, "authenticated")
+            if not rate_limit_result["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Rate limit exceeded",
+                        "current_count": rate_limit_result["current_count"],
+                        "limit": rate_limit_result["limit"],
+                        "reset_in_seconds": rate_limit_result["reset_in_seconds"]
+                    }
+                )
+
+            normalized_instrument = instrument_id.upper()
+            normalized_type = projection_type.lower()
+
+            try:
+                user_info = await self.auth_middleware.process_request(
+                    request, "read", "market_data"
+                )
+            except Exception as e:
+                self.logger.error("Auth middleware error", error=str(e))
+                raise
+
+            tenant_id = user_info["tenant_id"]
+
+            cached_projection = await self.cache_manager.get_served_custom(
+                tenant_id, normalized_type, normalized_instrument
+            )
+            if cached_projection:
+                self.observability.log_business_event(
+                    "served_custom_projection_cache_hit",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    user_id=user_info["user_id"],
+                    projection_type=normalized_type
+                )
+                return {
+                    "projection": cached_projection,
+                    "cached": True,
+                    "instrument_id": normalized_instrument,
+                    "tenant": tenant_id,
+                    "projection_type": normalized_type
+                }
+
+            try:
+                projection = await self.served_client.get_custom_projection(
+                    tenant_id, normalized_instrument, normalized_type
+                )
+            except ExternalServiceError as exc:
+                self.logger.error(
+                    "Served custom projection fetch error",
+                    instrument_id=normalized_instrument,
+                    tenant_id=tenant_id,
+                    projection_type=normalized_type,
+                    error=str(exc)
+                )
+                raise HTTPException(status_code=502, detail="Served data unavailable") from None
+
+            if projection is None:
+                raise HTTPException(status_code=404, detail="Served custom projection not found")
+
+            await self.cache_manager.set_served_custom(
+                tenant_id, normalized_type, normalized_instrument, projection
+            )
+
+            self.observability.log_business_event(
+                "served_custom_projection_fetched",
+                instrument_id=normalized_instrument,
+                tenant_id=tenant_id,
+                user_id=user_info["user_id"],
+                projection_type=normalized_type
+            )
+
+            return {
+                "projection": projection,
+                "cached": False,
+                "instrument_id": normalized_instrument,
+                "tenant": tenant_id,
+                "projection_type": normalized_type
+            }
         
         @self.app.get("/api/v1/auth/api-key")
         async def authenticate_with_api_key(
@@ -623,7 +888,7 @@ class GatewayService(BaseService):
                 self.logger.error("API key authentication error", error=str(e))
                 raise HTTPException(status_code=500, detail="Authentication error")
     
-    async def _check_dependencies(self):
+    def _check_dependencies(self):
         """Check gateway dependencies."""
         dependencies = {}
         
@@ -639,24 +904,18 @@ class GatewayService(BaseService):
         # Check auth service
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{self.config.auth_service_url}/health", timeout=5.0)
-                if response.status_code == 200:
-                    dependencies["auth"] = "ok"
-                else:
-                    dependencies["auth"] = "error"
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(f"{self.config.auth_service_url}/health")
+            dependencies["auth"] = "ok" if response.status_code == 200 else "error"
         except Exception:
             dependencies["auth"] = "error"
         
         # Check entitlements service
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{self.config.entitlements_service_url}/health", timeout=5.0)
-                if response.status_code == 200:
-                    dependencies["entitlements"] = "ok"
-                else:
-                    dependencies["entitlements"] = "error"
+            with httpx.Client(timeout=5.0) as client:
+                response = client.get(f"{self.config.entitlements_service_url}/health")
+            dependencies["entitlements"] = "ok" if response.status_code == 200 else "error"
         except Exception:
             dependencies["entitlements"] = "error"
         

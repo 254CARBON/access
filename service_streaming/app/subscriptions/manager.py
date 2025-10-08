@@ -155,6 +155,28 @@ class SubscriptionManager:
         )
         
         return removed_count
+
+    async def remove_subscription_by_connection_topic(self, connection_id: str, topic: str) -> bool:
+        """Remove a subscription matching connection + topic."""
+        if connection_id not in self.connection_subscriptions:
+            return False
+
+        subscription_ids = list(self.connection_subscriptions[connection_id])
+        removed = False
+
+        for subscription_id in subscription_ids:
+            subscription = self.subscriptions.get(subscription_id)
+            if subscription and subscription.topic == topic:
+                if await self.remove_subscription(subscription_id):
+                    removed = True
+
+        return removed
+
+    def has_topic_subscribers(self, topic: str) -> bool:
+        """Check if topic currently has subscribers."""
+        if topic not in self.topic_subscriptions:
+            return False
+        return len(self.topic_subscriptions[topic]) > 0
     
     async def get_topic_subscribers(self, topic: str) -> List[str]:
         """Get connection IDs subscribed to a topic."""

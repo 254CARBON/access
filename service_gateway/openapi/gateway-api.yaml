@@ -23,6 +23,112 @@ paths:
                 type: object
           description: Service is healthy
       summary: Health check
+  /api/v1/served/latest-price/{instrument_id}:
+    get:
+      summary: Get served latest price
+      parameters:
+        - in: path
+          name: instrument_id
+          required: true
+          schema:
+            type: string
+          description: Instrument identifier
+      responses:
+        '200':
+          description: Served latest price projection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projection:
+                    type: object
+                  cached:
+                    type: boolean
+                  instrument_id:
+                    type: string
+                  tenant:
+                    type: string
+        '404':
+          description: Projection not found
+        '502':
+          description: Downstream served data unavailable
+  /api/v1/served/curve-snapshots/{instrument_id}:
+    get:
+      summary: Get served curve snapshot
+      parameters:
+        - in: path
+          name: instrument_id
+          required: true
+          schema:
+            type: string
+          description: Instrument identifier
+        - in: query
+          name: horizon
+          required: true
+          schema:
+            type: string
+          description: Snapshot horizon identifier
+      responses:
+        '200':
+          description: Served curve snapshot projection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projection:
+                    type: object
+                  cached:
+                    type: boolean
+                  instrument_id:
+                    type: string
+                  tenant:
+                    type: string
+                  horizon:
+                    type: string
+        '404':
+          description: Projection not found
+        '502':
+          description: Downstream served data unavailable
+  /api/v1/served/custom/{projection_type}/{instrument_id}:
+    get:
+      summary: Get served custom projection
+      parameters:
+        - in: path
+          name: projection_type
+          required: true
+          schema:
+            type: string
+          description: Custom projection type
+        - in: path
+          name: instrument_id
+          required: true
+          schema:
+            type: string
+          description: Instrument identifier
+      responses:
+        '200':
+          description: Served custom projection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projection:
+                    type: object
+                  cached:
+                    type: boolean
+                  instrument_id:
+                    type: string
+                  tenant:
+                    type: string
+                  projection_type:
+                    type: string
+        '404':
+          description: Projection not found
+        '502':
+          description: Downstream served data unavailable
 servers:
 - description: Development server
   url: http://localhost:8000

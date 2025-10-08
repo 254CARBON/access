@@ -50,13 +50,12 @@ class AuthClient:
 
                 if response.status_code == 200:
                     result = response.json()
-                    if result.get("valid"):
-                        return result
-                    else:
-                        raise AuthenticationError(
-                            f"Token validation failed: {result.get('error')}",
-                            details={"auth_error": result.get("error")}
+                    if not result.get("valid"):
+                        self.logger.warning(
+                            "Token validation failed",
+                            error=result.get("error")
                         )
+                    return result
                 else:
                     raise AuthenticationError(
                         f"Auth service error: {response.status_code}",
@@ -79,7 +78,53 @@ class AuthClient:
                 details={"error": str(e)}
             )
     
-    async def get_user_info(self, token: str) -> Dict[str, Any]:
-        """Get user information from token."""
-        result = await self.verify_token(token)
-        return result.get("user_info", {})
+    @retry_on_exception((httpx.HTTPError, httpx.ConnectError), config=RetryConfig(max_attempts=3, base_delay=1.0))
+    async def verify_websocket_token(self, token: str) -> Dict[str, Any]:
+        """Verify a JWT token for WebSocket connections."""
+
+        async def _verify_token():
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.auth_service_url}/auth/verify-ws",
+                    json={"token": token}
+                )
+
+                if response.status_code == 200:
+                    return response.json()
+                raise AuthenticationError(
+                    f"Auth service error: {response.status_code}",
+                    details={"status_code": response.status_code}
+                )
+
+        try:
+            return await self.circuit_breaker.call(_verify_token)
+        except httpx.HTTPError as e:
+            self.logger.error("Auth service HTTP error", error=str(e))
+            raise AuthenticationError(
+                "Auth service unavailable",
+                details={"http_error": str(e)}
+            )
+        except Exception as e:
+            self.logger.error("Auth service error", error=str(e))
+            raise AuthenticationError(
+                f"Auth service error: {str(e)}",
+                details={"error": str(e)}
+            )
+
+    @retry_on_exception((httpx.HTTPError, httpx.ConnectError), config=RetryConfig(max_attempts=3, base_delay=1.0))
+    async def get_user_info(self, user_id: str) -> Dict[str, Any]:
+        """Retrieve user information from Auth service."""
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{self.auth_service_url}/auth/users/{user_id}"
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            if response.status_code == 404:
+                return {"error": "User not found"}
+            raise AuthenticationError(
+                f"Auth service error: {response.status_code}",
+                details={"status_code": response.status_code}
+            )

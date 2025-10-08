@@ -246,3 +246,73 @@ class TestCacheManager:
                 set_method = getattr(cache_manager, f"set_{cache_type}")
                 result = await set_method(user_id, tenant_id, test_data)
                 assert result is True
+
+    @pytest.mark.asyncio
+    async def test_served_latest_price_cache_roundtrip(self, cache_manager):
+        """Ensure served latest price cache serializes/deserializes JSON."""
+        tenant_id = "tenant-1"
+        instrument_id = "INST-1"
+        projection = {"projection_type": "latest_price", "instrument_id": instrument_id, "data": {"price": 42.1}}
+
+        with patch.object(cache_manager.adaptive_cache, 'get', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = json.dumps(projection)
+            cached = await cache_manager.get_served_latest_price(tenant_id, instrument_id)
+            assert cached == projection
+            mock_get.assert_called_once_with("served_latest_price", f"{tenant_id}:{instrument_id}")
+
+        with patch.object(cache_manager.adaptive_cache, 'set', new_callable=AsyncMock) as mock_set:
+            mock_set.return_value = True
+            result = await cache_manager.set_served_latest_price(tenant_id, instrument_id, projection)
+            assert result is True
+            args = mock_set.call_args.args
+            assert args[0] == "served_latest_price"
+            assert args[2] == f"{tenant_id}:{instrument_id}"
+            assert json.loads(args[1]) == projection
+
+    @pytest.mark.asyncio
+    async def test_served_curve_snapshot_cache_roundtrip(self, cache_manager):
+        """Ensure served curve snapshot cache handles horizon key."""
+        tenant_id = "tenant-1"
+        instrument_id = "INST-2"
+        horizon = "1d"
+        projection = {"projection_type": "curve_snapshot", "instrument_id": instrument_id, "data": {"horizon": horizon}}
+
+        key = f"{tenant_id}:{instrument_id}:{horizon}"
+        with patch.object(cache_manager.adaptive_cache, 'get', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = json.dumps(projection)
+            cached = await cache_manager.get_served_curve_snapshot(tenant_id, instrument_id, horizon)
+            assert cached == projection
+            mock_get.assert_called_once_with("served_curve_snapshot", key)
+
+        with patch.object(cache_manager.adaptive_cache, 'set', new_callable=AsyncMock) as mock_set:
+            mock_set.return_value = True
+            result = await cache_manager.set_served_curve_snapshot(tenant_id, instrument_id, horizon, projection)
+            assert result is True
+            args = mock_set.call_args.args
+            assert args[0] == "served_curve_snapshot"
+            assert args[2] == f"{tenant_id}:{instrument_id}:{horizon}"
+            assert json.loads(args[1]) == projection
+
+    @pytest.mark.asyncio
+    async def test_served_custom_cache_roundtrip(self, cache_manager):
+        """Ensure served custom projection cache works."""
+        tenant_id = "tenant-9"
+        projection_type = "vol_surface"
+        instrument_id = "INST-9"
+        projection = {"projection_type": projection_type, "instrument_id": instrument_id, "data": {"points": []}}
+
+        key = f"{tenant_id}:{projection_type}:{instrument_id}"
+        with patch.object(cache_manager.adaptive_cache, 'get', new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = json.dumps(projection)
+            cached = await cache_manager.get_served_custom(tenant_id, projection_type, instrument_id)
+            assert cached == projection
+            mock_get.assert_called_once_with("served_custom", key)
+
+        with patch.object(cache_manager.adaptive_cache, 'set', new_callable=AsyncMock) as mock_set:
+            mock_set.return_value = True
+            result = await cache_manager.set_served_custom(tenant_id, projection_type, instrument_id, projection)
+            assert result is True
+            args = mock_set.call_args.args
+            assert args[0] == "served_custom"
+            assert args[2] == f"{tenant_id}:{projection_type}:{instrument_id}"
+            assert json.loads(args[1]) == projection

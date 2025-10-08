@@ -106,14 +106,14 @@ GET /sse/stream?token=<jwt-token>
 POST /sse/subscribe
 Content-Type: application/x-www-form-urlencoded
 
-connection_id=conn-12345&topic=pricing.updates&filters={"commodity":"oil"}
+connection_id=conn-12345&topic=served.market.latest_prices.v1&filters={"commodity":"oil"}
 ```
 
 **Response:**
 ```json
 {
   "success": true,
-  "topic": "pricing.updates",
+  "topic": "served.market.latest_prices.v1",
   "filters": {
     "commodity": "oil"
   },
@@ -180,6 +180,16 @@ GET /stats
   }
 }
 ```
+
+## Supported Topics
+
+The streaming service enforces entitlements per topic. Built-in topics include:
+
+- `served.market.latest_prices.v1` — Served latest price projections (default subscription)
+- `pricing.curve.updates.v1` — Curve pricing updates
+- `market.data.updates.v1` — Normalized market data feeds
+
+Additional topics can be onboarded by extending the topic registry and updating entitlement rules.
 
 ## Message Formats
 

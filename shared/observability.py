@@ -69,6 +69,10 @@ class ObservabilityManager:
             user_id=user_id,
             tenant_id=tenant_id
         )
+
+    def set_request_id(self, request_id: Optional[str] = None) -> str:
+        """Generate and store a request ID in logging context."""
+        return set_request_id(request_id)
     
     def clear_request_context(self):
         """Clear request context."""

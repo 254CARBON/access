@@ -7,7 +7,7 @@ import json
 import sys
 import os
 import time
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # Add shared directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -16,7 +16,7 @@ from fastapi import WebSocket, WebSocketDisconnect, HTTPException, Depends, Quer
 from fastapi.responses import StreamingResponse
 from shared.base_service import BaseService
 from shared.logging import get_logger
-from shared.errors import AccessLayerException
+from shared.errors import AccessLayerException, AuthorizationError
 from shared.observability import get_observability_manager, observe_function, observe_operation
 
 from .kafka.consumer import KafkaConsumerManager
@@ -26,6 +26,7 @@ from .ws.handlers import WebSocketMessageHandler
 from .sse.stream_manager import SSEStreamManager
 from .subscriptions.manager import SubscriptionManager
 from .auth.client import AuthClient
+from .entitlements.client import EntitlementsClient
 
 
 class StreamingService(BaseService):
@@ -59,14 +60,40 @@ class StreamingService(BaseService):
         )
         self.subscription_manager = SubscriptionManager()
         self.auth_client = AuthClient(self.config.auth_service_url)
+        self.entitlements_client = EntitlementsClient(self.config.entitlements_service_url)
+
+        self.supported_topics: Dict[str, Dict[str, Any]] = {
+            "served.market.latest_prices.v1": {
+                "resource": "market_data",
+                "action": "read",
+                "description": "Served latest price updates"
+            },
+            "pricing.curve.updates.v1": {
+                "resource": "curve",
+                "action": "read",
+                "description": "Curve pricing updates"
+            },
+            "market.data.updates.v1": {
+                "resource": "market_data",
+                "action": "read",
+                "description": "Real-time market data updates"
+            }
+        }
+        self.default_stream_topics = list(self.supported_topics.keys())
+        self._topic_subscription_lock = asyncio.Lock()
         
         # Initialize message handler
         self.ws_handler = WebSocketMessageHandler(
             connection_manager=self.ws_manager,
-            kafka_message_handler=self._handle_kafka_message
+            kafka_message_handler=self._handle_kafka_message,
+            subscription_manager=self.subscription_manager,
+            entitlement_checker=self._check_topic_entitlements,
+            ensure_topic_subscription=self._ensure_kafka_subscription,
+            topic_registry=self.supported_topics
         )
         
         self._setup_streaming_routes()
+        self.app.state.streaming_service = self
     
     def _setup_streaming_routes(self):
         """Set up streaming-specific routes."""
@@ -78,7 +105,15 @@ class StreamingService(BaseService):
                 "service": "streaming",
                 "message": "254Carbon Access Layer - Streaming Service",
                 "version": "1.0.0",
-                "capabilities": ["websocket", "sse", "kafka"]
+                "capabilities": ["websocket", "sse", "kafka"],
+                "topics": self.supported_topics
+            }
+        
+        @self.app.get("/ws/stream")
+        async def websocket_info():
+            """Informational endpoint for WebSocket route."""
+            return {
+                "message": "WebSocket endpoint available at /ws/stream (WebSocket handshake required)."
             }
         
         @self.app.websocket("/ws/stream")
@@ -181,6 +216,10 @@ class StreamingService(BaseService):
         @self.app.get("/sse/stream")
         async def sse_endpoint(token: Optional[str] = Query(None)):
             """Server-Sent Events streaming endpoint."""
+            if token is None:
+                return {
+                    "message": "SSE endpoint available at /sse/stream (token required for live data)."
+                }
             try:
                 # Authenticate user
                 user_info = await self._authenticate_sse(token)
@@ -222,6 +261,19 @@ class StreamingService(BaseService):
             try:
                 # Parse filters
                 filter_data = json.loads(filters) if filters else {}
+
+                if topic not in self.supported_topics:
+                    raise HTTPException(status_code=400, detail="Unsupported topic")
+
+                connection = self.sse_manager.connections.get(connection_id)
+                if not connection:
+                    raise HTTPException(status_code=404, detail="Connection not found")
+
+                # Check entitlements
+                if not await self._check_topic_entitlements(connection, topic):
+                    raise HTTPException(status_code=403, detail="Entitlement denied")
+
+                await self._ensure_kafka_subscription(topic)
                 
                 # Subscribe to topic
                 success = await self.sse_manager.subscribe_to_topic(
@@ -229,6 +281,13 @@ class StreamingService(BaseService):
                 )
                 
                 if success:
+                    await self.subscription_manager.create_subscription(
+                        connection_id=connection_id,
+                        topic=topic,
+                        filters=filter_data,
+                        user_id=connection.user_id,
+                        tenant_id=connection.tenant_id
+                    )
                     return {"success": True, "topic": topic}
                 else:
                     raise HTTPException(status_code=400, detail="Subscription failed")
@@ -247,8 +306,65 @@ class StreamingService(BaseService):
                 "kafka": {
                     "consumer_running": self.kafka_consumer.is_running(),
                     "subscribed_topics": self.kafka_consumer.get_subscribed_topics()
-                }
+                },
+                "supported_topics": self.supported_topics
             }
+    
+    async def _check_topic_entitlements(self, connection, topic: str) -> bool:
+        """Verify that a connection has entitlements for a topic."""
+        topic_info = self.supported_topics.get(topic)
+        if not topic_info:
+            return False
+
+        user_id = getattr(connection, "user_id", None)
+        tenant_id = getattr(connection, "tenant_id", None)
+        connection_id = getattr(connection, "connection_id", "unknown")
+
+        if not user_id or not tenant_id:
+            return False
+
+        try:
+            await self.entitlements_client.check_access(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                resource=topic_info["resource"],
+                action=topic_info.get("action", "read"),
+                context={
+                    "topic": topic,
+                    "connection_id": connection_id
+                }
+            )
+            return True
+        except AuthorizationError as exc:
+            self.logger.warning(
+                "Entitlement denied",
+                topic=topic,
+                connection_id=connection_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                error=str(exc)
+            )
+            return False
+        except Exception as exc:
+            self.logger.error(
+                "Entitlement check error",
+                topic=topic,
+                connection_id=connection_id,
+                error=str(exc)
+            )
+            return False
+
+    async def _ensure_kafka_subscription(self, topic: str):
+        """Ensure Kafka consumer is subscribed to the topic."""
+        if topic not in self.supported_topics:
+            raise AccessLayerException("UNKNOWN_TOPIC", f"Unsupported topic: {topic}")
+
+        async with self._topic_subscription_lock:
+            if topic in self.kafka_consumer.get_subscribed_topics():
+                return
+
+            await self.kafka_consumer.subscribe_to_topic(topic, self._handle_kafka_message)
+            self.logger.info("Subscribed to Kafka topic", topic=topic)
     
     async def _authenticate_websocket(self, token: Optional[str]) -> dict:
         """Authenticate WebSocket connection."""
@@ -296,6 +412,7 @@ class StreamingService(BaseService):
         finally:
             # Clean up connection
             await self.sse_manager.remove_connection(connection_id)
+            await self.subscription_manager.remove_connection_subscriptions(connection_id)
     
     async def _handle_kafka_message(self, kafka_message):
         """Handle incoming Kafka message."""
@@ -336,7 +453,7 @@ class StreamingService(BaseService):
     async def _check_dependencies(self):
         """Check streaming service dependencies."""
         dependencies = {}
-        
+
         try:
             # Check Kafka
             if self.kafka_consumer.is_running():
@@ -345,20 +462,20 @@ class StreamingService(BaseService):
                 dependencies["kafka"] = "error"
         except Exception:
             dependencies["kafka"] = "error"
-        
+
         try:
             # Check auth service
             # Simple health check
             dependencies["auth"] = "ok"
         except Exception:
             dependencies["auth"] = "error"
-        
+
         try:
             # Check entitlements service
             dependencies["entitlements"] = "ok"
         except Exception:
             dependencies["entitlements"] = "error"
-        
+
         return dependencies
     
     async def start(self):
@@ -366,6 +483,16 @@ class StreamingService(BaseService):
         await self.kafka_consumer.start()
         await self.kafka_producer.start()
         await self.ws_manager.start()
+
+        for topic in self.default_stream_topics:
+            try:
+                await self._ensure_kafka_subscription(topic)
+            except Exception as exc:
+                self.logger.error(
+                    "Failed to subscribe to default topic",
+                    topic=topic,
+                    error=str(exc)
+                )
         
         self.logger.info("Streaming service components started")
     

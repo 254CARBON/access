@@ -6,7 +6,7 @@ import asyncio
 import json
 from typing import Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
-from kafka import KafkaConsumer
+import kafka
 from kafka.errors import KafkaError
 import sys
 import os
@@ -37,16 +37,22 @@ class KafkaConsumerManager:
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
         self.logger = get_logger("streaming.kafka.consumer")
-        self.consumer: Optional[KafkaConsumer] = None
+        self.consumer: Optional[kafka.KafkaConsumer] = None
         self.subscribed_topics: List[str] = []
         self.message_handlers: Dict[str, Callable[[KafkaMessage], None]] = {}
         self.running = False
         self._consumer_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    async def _await_if_needed(result):
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
     
-    async def start(self):
+    async def start(self, start_loop: bool = False):
         """Start the Kafka consumer."""
         try:
-            self.consumer = KafkaConsumer(
+            self.consumer = kafka.KafkaConsumer(
                 bootstrap_servers=self.bootstrap_servers,
                 group_id=self.group_id,
                 value_deserializer=lambda x: x,  # Keep as bytes for now
@@ -59,7 +65,8 @@ class KafkaConsumerManager:
             )
             
             self.running = True
-            self._consumer_task = asyncio.create_task(self._consume_loop())
+            if start_loop:
+                self._consumer_task = asyncio.create_task(self._consume_loop())
             self.logger.info("Kafka consumer started", group_id=self.group_id)
             
         except Exception as e:
@@ -77,7 +84,7 @@ class KafkaConsumerManager:
                 pass
         
         if self.consumer:
-            self.consumer.close()
+            await self._await_if_needed(self.consumer.close())
             self.logger.info("Kafka consumer stopped")
     
     async def subscribe_to_topic(self, topic: str, handler: Callable[[KafkaMessage], None]):
@@ -91,7 +98,7 @@ class KafkaConsumerManager:
         
         try:
             # Subscribe to topic
-            self.consumer.subscribe([topic])
+            await self._await_if_needed(self.consumer.subscribe([topic]))
             self.subscribed_topics.append(topic)
             self.message_handlers[topic] = handler
             
@@ -105,7 +112,7 @@ class KafkaConsumerManager:
         """Unsubscribe from a Kafka topic."""
         if topic not in self.subscribed_topics:
             self.logger.warning("Not subscribed to topic", topic=topic)
-            return
+            raise AccessLayerException("KAFKA_UNSUBSCRIBE_FAILED", "Not subscribed to topic")
         
         try:
             # Remove from subscriptions
@@ -115,9 +122,9 @@ class KafkaConsumerManager:
             
             # Re-subscribe with remaining topics
             if self.subscribed_topics:
-                self.consumer.subscribe(self.subscribed_topics)
+                await self._await_if_needed(self.consumer.subscribe(self.subscribed_topics))
             else:
-                self.consumer.unsubscribe()
+                await self._await_if_needed(self.consumer.unsubscribe())
             
             self.logger.info("Unsubscribed from topic", topic=topic)
             
@@ -135,8 +142,11 @@ class KafkaConsumerManager:
                 
                 # Poll for messages
                 message_batch = self.consumer.poll(timeout_ms=1000)
+                if asyncio.iscoroutine(message_batch):
+                    message_batch = await message_batch
                 
-                if not message_batch:
+                if not message_batch or not isinstance(message_batch, dict):
+                    await asyncio.sleep(0)
                     continue
                 
                 # Process messages
@@ -147,7 +157,7 @@ class KafkaConsumerManager:
                         continue
                     
                     handler = self.message_handlers[topic]
-                    
+
                     for message in messages:
                         try:
                             # Wrap message
@@ -160,12 +170,13 @@ class KafkaConsumerManager:
                                 timestamp=message.timestamp,
                                 headers=dict(message.headers) if message.headers else None
                             )
-                            
-                            # Call handler
-                            await asyncio.get_event_loop().run_in_executor(
-                                None, handler, kafka_message
-                            )
-                            
+
+                            if asyncio.iscoroutinefunction(handler):
+                                await handler(kafka_message)
+                            else:
+                                loop = asyncio.get_event_loop()
+                                await loop.run_in_executor(None, handler, kafka_message)
+
                         except Exception as e:
                             self.logger.error(
                                 "Error processing message",
@@ -177,7 +188,10 @@ class KafkaConsumerManager:
             except KafkaError as e:
                 self.logger.error("Kafka error in consume loop", error=str(e))
                 await asyncio.sleep(5)  # Back off on errors
-                
+
+            except asyncio.CancelledError:
+                break
+
             except Exception as e:
                 self.logger.error("Unexpected error in consume loop", error=str(e))
                 await asyncio.sleep(1)

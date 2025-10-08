@@ -11,7 +11,7 @@ events_in:
 events_out:
   - metrics.request.count.v1
 dependencies:
-  internal: [auth, entitlements, metrics]
+  internal: [auth, entitlements, metrics, projection]
   external: [redis, clickhouse]
 maturity: stable
 sla:

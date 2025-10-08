@@ -2,8 +2,8 @@
 Token bucket rate limiter for Gateway service.
 """
 
-import time
-from typing import Dict, Any, Optional, Tuple
+import asyncio
+from typing import Dict, Any, Optional
 import redis.asyncio as redis
 from fastapi import Request
 import sys
@@ -44,27 +44,49 @@ class TokenBucketRateLimiter:
 
     async def check_rate_limit(self, client_id: str, endpoint: str, limit_type: str = "authenticated") -> Dict[str, Any]:
         """Check if request is within rate limits."""
+        window_size = 60  # seconds
+        limit = self.default_limits.get(limit_type, self.default_limits["authenticated"])
+
         try:
             redis_client = await self._get_redis()
-            key = self._make_key(client_id, endpoint)
-            limit = self.default_limits.get(limit_type, self.default_limits["authenticated"])
+        except Exception as e:
+            self.logger.error("Rate limit check error", error=str(e))
+            return {
+                "allowed": True,
+                "current_count": 0,
+                "limit": limit,
+                "remaining": limit,
+                "reset_in_seconds": window_size,
+                "error": "Redis unavailable"
+            }
 
-            # Window size in seconds (1 minute)
-            window_size = 60
+        key = self._make_key(client_id, endpoint)
 
-            current_time = time.time()
+        try:
+            pipeline_obj = redis_client.pipeline()
+            if asyncio.iscoroutine(pipeline_obj):
+                pipeline_obj = await pipeline_obj
 
-            # Use Redis sorted set for sliding window
-            # Remove old entries outside the window
-            cutoff_time = current_time - window_size
-            await redis_client.zremrangebyscore(key, 0, cutoff_time)
+            async with pipeline_obj as pipeline:
+                get_result = pipeline.get(key)
+                if asyncio.iscoroutine(get_result):
+                    await get_result
+                results = await pipeline.execute()
 
-            # Count current requests in window
-            current_count = await redis_client.zcard(key)
+            current_value = results[0]
+            if isinstance(current_value, bytes):
+                current_value = current_value.decode("utf-8")
 
-            if current_count >= limit:
-                # Rate limit exceeded
-                ttl = await redis_client.ttl(key) or window_size
+            current_count = int(current_value) if current_value is not None else 0
+            new_count = current_count + 1
+
+            if new_count > limit:
+                ttl_result = redis_client.ttl(key)
+                if asyncio.iscoroutine(ttl_result):
+                    ttl_result = await ttl_result
+                ttl = ttl_result if isinstance(ttl_result, (int, float)) else window_size
+                if ttl is None or ttl < 0:
+                    ttl = window_size
                 self.logger.warning(
                     "Rate limit exceeded",
                     client_id=client_id,
@@ -72,7 +94,6 @@ class TokenBucketRateLimiter:
                     current_count=current_count,
                     limit=limit
                 )
-
                 return {
                     "allowed": False,
                     "current_count": current_count,
@@ -81,27 +102,24 @@ class TokenBucketRateLimiter:
                     "retry_after": int(ttl)
                 }
 
-            # Add current request to the window
-            await redis_client.zadd(key, {str(current_time): current_time})
-            await redis_client.expire(key, window_size)
+            await redis_client.setex(key, window_size, new_count)
 
             return {
                 "allowed": True,
-                "current_count": current_count + 1,
+                "current_count": new_count,
                 "limit": limit,
-                "remaining": limit - (current_count + 1),
+                "remaining": max(0, limit - new_count),
                 "reset_in_seconds": window_size
             }
 
         except Exception as e:
             self.logger.error("Rate limit check error", error=str(e))
-            # Allow request if rate limiter fails
             return {
                 "allowed": True,
                 "current_count": 0,
-                "limit": self.default_limits.get(limit_type, self.default_limits["authenticated"]),
-                "remaining": self.default_limits.get(limit_type, self.default_limits["authenticated"]),
-                "reset_in_seconds": 60,
+                "limit": limit,
+                "remaining": limit,
+                "reset_in_seconds": window_size,
                 "error": str(e)
             }
 
@@ -111,7 +129,10 @@ class TokenBucketRateLimiter:
             redis_client = await self._get_redis()
             key = self._make_key(client_id, endpoint)
 
-            current_count = await redis_client.zcard(key)
+            current_value = await redis_client.get(key)
+            if isinstance(current_value, bytes):
+                current_value = current_value.decode("utf-8")
+            current_count = int(current_value) if current_value else 0
             limit = self.default_limits.get("authenticated", 1000)
 
             return {
@@ -157,7 +178,10 @@ class TokenBucketRateLimiter:
             total_requests = 0
 
             for key in keys:
-                count = await redis_client.zcard(key)
+                value = await redis_client.get(key)
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
+                count = int(value) if value else 0
                 total_requests += count
 
             return {
@@ -183,24 +207,36 @@ class RateLimitMiddleware:
         # Extract client ID (use IP for public, user_id for authenticated)
         client_id = self._get_client_id(request)
 
-        # Determine endpoint category
-        endpoint = self._categorize_endpoint(request.url.path)
+        endpoint_path = request.url.path
 
-        return await self.rate_limiter.check_rate_limit(client_id, endpoint, limit_type)
+        try:
+            return await self.rate_limiter.check_rate_limit(client_id, endpoint_path, limit_type)
+        except Exception as e:
+            self.logger.error("Rate limiter middleware error", error=str(e))
+            limit = self.rate_limiter.default_limits.get(limit_type, self.rate_limiter.default_limits.get("authenticated", 1000))
+            return {
+                "allowed": True,
+                "current_count": 0,
+                "limit": limit,
+                "remaining": limit,
+                "reset_in_seconds": 60,
+                "error": str(e)
+            }
 
     def _get_client_id(self, request: Request) -> str:
         """Extract client ID from request."""
         # Try to get user_id from request state (set by auth middleware)
-        if hasattr(request.state, 'user_info'):
-            return request.state.user_info.get('user_id', 'anonymous')
+        user_info = getattr(request.state, 'user_info', None)
+        if isinstance(user_info, dict):
+            return user_info.get('user_id', 'anonymous')
 
         # Fall back to IP address
         forwarded_for = request.headers.get('X-Forwarded-For')
-        if forwarded_for:
+        if isinstance(forwarded_for, str) and forwarded_for:
             return forwarded_for.split(',')[0].strip()
 
         real_ip = request.headers.get('X-Real-IP')
-        if real_ip:
+        if isinstance(real_ip, str) and real_ip:
             return real_ip
 
         return request.client.host if request.client else 'unknown'

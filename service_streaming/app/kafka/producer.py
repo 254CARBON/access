@@ -2,10 +2,11 @@
 Kafka producer for Streaming Service.
 """
 
+import asyncio
 import json
 import time
 from typing import Dict, Any, Optional
-from kafka import KafkaProducer
+import kafka
 from kafka.errors import KafkaError
 import sys
 import os
@@ -23,12 +24,18 @@ class KafkaProducerManager:
     def __init__(self, bootstrap_servers: str):
         self.bootstrap_servers = bootstrap_servers
         self.logger = get_logger("streaming.kafka.producer")
-        self.producer: Optional[KafkaProducer] = None
+        self.producer: Optional[kafka.KafkaProducer] = None
+    
+    @staticmethod
+    async def _await_if_needed(result):
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
     
     async def start(self):
         """Start the Kafka producer."""
         try:
-            self.producer = KafkaProducer(
+            self.producer = kafka.KafkaProducer(
                 bootstrap_servers=self.bootstrap_servers,
                 value_serializer=lambda x: json.dumps(x).encode('utf-8'),
                 key_serializer=lambda x: x.encode('utf-8') if x else None,
@@ -48,8 +55,8 @@ class KafkaProducerManager:
     async def stop(self):
         """Stop the Kafka producer."""
         if self.producer:
-            self.producer.flush()
-            self.producer.close()
+            await self._await_if_needed(self.producer.flush())
+            await self._await_if_needed(self.producer.close())
             self.logger.info("Kafka producer stopped")
     
     async def send_message(
@@ -77,9 +84,15 @@ class KafkaProducerManager:
                 key=key,
                 headers=kafka_headers
             )
-            
+            if asyncio.iscoroutine(future):
+                future = await future
+
             # Wait for confirmation
-            record_metadata = future.get(timeout=10)
+            get_result = future.get(timeout=10)
+            if asyncio.iscoroutine(get_result):
+                record_metadata = await get_result
+            else:
+                record_metadata = get_result
             
             self.logger.debug(
                 "Message sent successfully",

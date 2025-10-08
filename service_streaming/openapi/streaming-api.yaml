@@ -23,6 +23,27 @@ paths:
                 type: object
           description: Service is healthy
       summary: Health check
+  /stats:
+    get:
+      summary: Service statistics
+      responses:
+        '200':
+          description: Streaming service statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  websocket:
+                    type: object
+                  sse:
+                    type: object
+                  subscriptions:
+                    type: object
+                  kafka:
+                    type: object
+                  supported_topics:
+                    type: object
 servers:
 - description: Development server
   url: http://localhost:8001
