@@ -65,7 +65,9 @@ if OTEL_AVAILABLE:
             console_processor = BatchSpanProcessor(console_exporter)
             trace.get_tracer_provider().add_span_processor(console_processor)
 
-        FastAPIInstrumentor.instrument()
+        # FastAPI instrumentation requires an instance in recent releases.
+        # Instantiating avoids TypeError when the class method signature changes.
+        FastAPIInstrumentor().instrument()
         RedisInstrumentor().instrument()
         SQLAlchemyInstrumentor().instrument()
         HTTPXClientInstrumentor().instrument()

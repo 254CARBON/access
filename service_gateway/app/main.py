@@ -41,11 +41,13 @@ class GatewayService(BaseService):
         self.rate_limit_middleware = RateLimitMiddleware(self.rate_limiter)
         
         # Initialize observability
+        otel_exporter = self.config.otel_exporter if self.config.enable_tracing else None
+        enable_console = self.config.enable_console_tracing if self.config.enable_tracing else False
         self.observability = get_observability_manager(
             "gateway",
             log_level=self.config.log_level,
-            otel_exporter=self.config.otel_exporter,
-            enable_console=self.config.enable_console_tracing
+            otel_exporter=otel_exporter,
+            enable_console=enable_console
         )
         
         # API key authentication fallback

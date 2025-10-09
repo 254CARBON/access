@@ -36,11 +36,13 @@ class StreamingService(BaseService):
         super().__init__("streaming", 8001)
         
         # Initialize observability
+        otel_exporter = self.config.otel_exporter if self.config.enable_tracing else None
+        enable_console = self.config.enable_console_tracing if self.config.enable_tracing else False
         self.observability = get_observability_manager(
             "streaming",
             log_level=self.config.log_level,
-            otel_exporter=self.config.otel_exporter,
-            enable_console=self.config.enable_console_tracing
+            otel_exporter=otel_exporter,
+            enable_console=enable_console
         )
         
         # Initialize components
@@ -217,9 +219,10 @@ class StreamingService(BaseService):
         async def sse_endpoint(token: Optional[str] = Query(None)):
             """Server-Sent Events streaming endpoint."""
             if token is None:
-                return {
-                    "message": "SSE endpoint available at /sse/stream (token required for live data)."
-                }
+                raise HTTPException(status_code=401, detail={
+                    "error": "MISSING_TOKEN",
+                    "message": "SSE token required"
+                })
             try:
                 # Authenticate user
                 user_info = await self._authenticate_sse(token)
@@ -289,11 +292,18 @@ class StreamingService(BaseService):
                         tenant_id=connection.tenant_id
                     )
                     return {"success": True, "topic": topic}
-                else:
-                    raise HTTPException(status_code=400, detail="Subscription failed")
-                    
+
+                raise HTTPException(status_code=400, detail="Subscription failed")
+
+            except HTTPException:
+                raise
             except Exception as e:
-                self.logger.error("SSE subscription error", error=str(e))
+                self.logger.error(
+                    "SSE subscription error",
+                    error=str(e),
+                    connection_id=connection_id,
+                    topic=topic
+                )
                 raise HTTPException(status_code=500, detail="Internal server error")
         
         @self.app.get("/stats")
@@ -374,12 +384,15 @@ class StreamingService(BaseService):
         try:
             # Call auth service
             response = await self.auth_client.verify_websocket_token(token)
-            
+
             if not response.get("valid"):
+                self.logger.warning("Invalid WebSocket token", token_preview=token[:8] + "...")
                 raise AccessLayerException("INVALID_TOKEN", "Invalid WebSocket token")
-            
+
             return response.get("user_info", {})
-            
+
+        except AccessLayerException:
+            raise
         except Exception as e:
             self.logger.error("WebSocket authentication error", error=str(e))
             raise AccessLayerException("AUTH_ERROR", "Authentication failed")
@@ -392,12 +405,15 @@ class StreamingService(BaseService):
         try:
             # Call auth service
             response = await self.auth_client.verify_token(token)
-            
+
             if not response.get("valid"):
+                self.logger.warning("Invalid SSE token", token_preview=token[:8] + "...")
                 raise AccessLayerException("INVALID_TOKEN", "Invalid SSE token")
-            
+
             return response.get("user_info", {})
-            
+
+        except AccessLayerException:
+            raise
         except Exception as e:
             self.logger.error("SSE authentication error", error=str(e))
             raise AccessLayerException("AUTH_ERROR", "Authentication failed")
@@ -455,12 +471,18 @@ class StreamingService(BaseService):
         dependencies = {}
 
         try:
-            # Check Kafka
-            if self.kafka_consumer.is_running():
-                dependencies["kafka"] = "ok"
-            else:
-                dependencies["kafka"] = "error"
+            consumer_running = self.kafka_consumer.is_running()
         except Exception:
+            consumer_running = False
+
+        try:
+            producer_running = self.kafka_producer.is_running()
+        except Exception:
+            producer_running = False
+
+        if consumer_running and producer_running:
+            dependencies["kafka"] = "ok"
+        else:
             dependencies["kafka"] = "error"
 
         try:

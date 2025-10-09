@@ -52,7 +52,7 @@ class BaseConfig(BaseSettings):
     projection_service_url: str = Field(default="http://localhost:8085", env="ACCESS_PROJECTION_SERVICE_URL")
     
     # Observability
-    enable_tracing: bool = Field(default=True, env="ACCESS_ENABLE_TRACING")
+    enable_tracing: bool = Field(default=False, env="ACCESS_ENABLE_TRACING")
     otel_exporter: str = Field(default="http://localhost:4318", env="ACCESS_OTEL_EXPORTER")
     enable_console_tracing: bool = Field(default=False, env="ACCESS_ENABLE_CONSOLE_TRACING")
 

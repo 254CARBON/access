@@ -110,6 +110,10 @@ class KafkaProducerManager:
         except Exception as e:
             self.logger.error("Error sending message", topic=topic, error=str(e))
             return False
+
+    def is_running(self) -> bool:
+        """Return True when the producer has been started."""
+        return self.producer is not None
     
     async def send_metrics_message(
         self,
