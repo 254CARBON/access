@@ -6,12 +6,28 @@ import pytest
 import json
 from unittest.mock import AsyncMock, patch, MagicMock
 from typing import Dict, Any, List
+from pathlib import Path
+from datetime import datetime, timezone
 
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from service_gateway.app.caching.cache_manager import CacheManager
+
+
+class DummyMetrics:
+    """Minimal metrics collector stub."""
+
+    def __init__(self):
+        self.counters = []
+        self.histograms = []
+
+    def increment_counter(self, metric_name: str, **labels):
+        self.counters.append((metric_name, labels))
+
+    def observe_histogram(self, metric_name: str, value: float, **labels):
+        self.histograms.append((metric_name, value, labels))
 
 
 class TestCacheManager:
@@ -153,12 +169,102 @@ class TestCacheManager:
         tenant_id = "tenant-1"
 
         with patch.object(cache_manager.adaptive_cache, 'warm_cache', new_callable=AsyncMock) as mock_warm:
-            mock_warm.return_value = True
+            mock_warm.return_value = {"warmed": {}, "planned": {}}
 
             result = await cache_manager.warm_cache(user_id, tenant_id)
 
-            assert result is True
+            assert result == {"warmed": {}, "planned": {}}
             mock_warm.assert_called_once_with(user_id, tenant_id)
+
+    @pytest.mark.asyncio
+    async def test_warm_cache_served_client_hits(self, tmp_path):
+        """Warm cache using served client and curated hot query file."""
+        dataset = {
+            "metadata": {},
+            "latest_price": {
+                "ttl_seconds": 30,
+                "entries": [
+                    {"tenant_id": "tenant-42", "instrument_id": "INST-LATEST", "weight": 1.0}
+                ],
+            },
+            "curve_snapshot": {
+                "entries": [
+                    {"tenant_id": "tenant-42", "instrument_id": "INST-CURVE", "horizon": "1M", "weight": 0.6}
+                ],
+            },
+            "custom": {
+                "entries": [
+                    {
+                        "tenant_id": "tenant-42",
+                        "instrument_id": "INST-CUSTOM",
+                        "projection_type": "vol_surface",
+                        "weight": 0.4,
+                    }
+                ],
+            },
+        }
+
+        hot_file = tmp_path / "hot_queries.json"
+        hot_file.write_text(json.dumps(dataset))
+
+        served_client = AsyncMock()
+        now = datetime.now(timezone.utc).isoformat()
+        served_client.get_latest_price.return_value = {
+            "projection_type": "latest_price",
+            "instrument_id": "INST-LATEST",
+            "tenant_id": "tenant-42",
+            "last_updated": now,
+            "data": {"timestamp": now},
+        }
+        served_client.get_curve_snapshot.return_value = {
+            "projection_type": "curve_snapshot",
+            "instrument_id": "INST-CURVE",
+            "tenant_id": "tenant-42",
+            "last_updated": now,
+            "data": {"horizon": "1M", "timestamp": now},
+        }
+        served_client.get_custom_projection.return_value = {
+            "projection_type": "vol_surface",
+            "instrument_id": "INST-CUSTOM",
+            "tenant_id": "tenant-42",
+            "last_updated": now,
+            "data": {"timestamp": now},
+        }
+
+        metrics = DummyMetrics()
+        manager = CacheManager(
+            "redis://localhost:6379/0",
+            served_client,
+            metrics=metrics,
+            hot_queries_path=hot_file,
+            warm_concurrency=1,
+        )
+
+        with patch.object(manager, "set_served_latest_price", new=AsyncMock(return_value=True)) as mock_latest, \
+             patch.object(manager, "set_served_curve_snapshot", new=AsyncMock(return_value=True)) as mock_curve, \
+             patch.object(manager, "set_served_custom", new=AsyncMock(return_value=True)) as mock_custom:
+
+            summary = await manager.warm_cache("user-abc", "tenant-42")
+
+        assert summary["warmed"]["latest_price"] == 1
+        assert summary["warmed"]["curve_snapshot"] == 1
+        assert summary["warmed"]["custom"] == 1
+        assert summary["planned"]["latest_price"] == 1
+        assert summary["misses"] == 0
+        assert summary["errors"] == []
+
+        mock_latest.assert_awaited_once()
+        mock_curve.assert_awaited_once()
+        mock_custom.assert_awaited_once()
+
+        # Metrics should have been recorded for the cache warm operations.
+        assert any(
+            metric_name == "served_cache_warm_total"
+            and labels["projection_type"] == "latest_price"
+            and labels["result"] == "hit"
+            for metric_name, labels in metrics.counters
+        )
+        assert any(metric_name == "served_cache_warm_duration_seconds" for metric_name, _value, _labels in metrics.histograms)
 
     @pytest.mark.asyncio
     async def test_get_cache_stats(self, cache_manager):
@@ -176,7 +282,10 @@ class TestCacheManager:
 
             result = await cache_manager.get_cache_stats()
 
-            assert result == mock_stats
+            assert result["hit_ratio"] == mock_stats["hit_ratio"]
+            assert "cache_types" in result
+            assert "warm_cache_available" in result
+            assert "hot_query_categories" in result
             mock_get_stats.assert_called_once()
 
     @pytest.mark.asyncio

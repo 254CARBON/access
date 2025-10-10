@@ -42,7 +42,14 @@ class GatewayService(BaseService):
         self.entitlements_client = EntitlementsClient(self.config.entitlements_service_url)
         self.served_client = ServedDataClient(self.config.projection_service_url)
         self.auth_middleware = AuthMiddleware(self.auth_client, self.entitlements_client)
-        self.cache_manager = CacheManager(self.config.redis_url)
+        hot_queries_path = os.getenv("ACCESS_HOT_SERVED_QUERIES_FILE")
+        self.cache_manager = CacheManager(
+            self.config.redis_url,
+            self.served_client,
+            metrics=self.metrics,
+            hot_queries_path=hot_queries_path,
+            warm_concurrency=getattr(self.config, "cache_warm_concurrency", 5),
+        )
         self.rate_limiter = TokenBucketRateLimiter(self.config.redis_url)
         self.rate_limit_middleware = RateLimitMiddleware(self.rate_limiter)
         self.rate_limiter.default_limits.setdefault("market_data", 600)
@@ -98,6 +105,7 @@ class GatewayService(BaseService):
             await self.clickhouse_client.close()
 
         self._setup_gateway_routes()
+        self._setup_north_america_routes()
         self._setup_observability_middleware()
 
         # Expose service instance via app state for introspection/testing
@@ -515,14 +523,15 @@ class GatewayService(BaseService):
                 )
 
                 # Warm cache for the user
-                await self.cache_manager.warm_cache(
+                warm_summary = await self.cache_manager.warm_cache(
                     user_info["user_id"], user_info["tenant_id"]
                 )
 
                 return {
                     "message": "Cache warmed successfully",
                     "user": user_info["user_id"],
-                    "tenant": user_info["tenant_id"]
+                    "tenant": user_info["tenant_id"],
+                    "summary": warm_summary
                 }
             except Exception as e:
                 self.logger.error("Cache warming error", error=str(e))
@@ -1084,9 +1093,9 @@ class GatewayService(BaseService):
             try:
                 if x_api_key not in self.api_keys:
                     raise HTTPException(status_code=401, detail="Invalid API key")
-                
+
                 api_key_info = self.api_keys[x_api_key]
-                
+
                 # Create mock user info for API key
                 user_info = {
                     "user_id": f"api-key-{x_api_key}",
@@ -1094,25 +1103,432 @@ class GatewayService(BaseService):
                     "roles": api_key_info["roles"],
                     "auth_method": "api_key"
                 }
-                
+
                 self.logger.info(
                     "API key authentication successful",
                     api_key=x_api_key[:8] + "...",
                     tenant_id=api_key_info["tenant_id"]
                 )
-                
+
                 return {
                     "authenticated": True,
                     "user_info": user_info,
                     "expires_in": 3600  # 1 hour
                 }
-                
+
             except HTTPException:
                 raise
             except Exception as e:
                 self.logger.error("API key authentication error", error=str(e))
                 raise HTTPException(status_code=500, detail="Authentication error")
-    
+
+    def _setup_north_america_routes(self):
+        """Set up North America market API routes."""
+
+        @self.app.post("/api/v1/irp/cases")
+        async def create_irp_case_endpoint(request: Request):
+            return await self.create_irp_case(request)
+
+        @self.app.get("/api/v1/irp/cases")
+        async def list_irp_cases_endpoint(request: Request):
+            return await self.list_irp_cases(request)
+
+        @self.app.get("/api/v1/irp/cases/{case_id}")
+        async def get_irp_case_endpoint(case_id: str, request: Request):
+            return await self.get_irp_case(case_id, request)
+
+        @self.app.post("/api/v1/rps/compliance")
+        async def run_rps_compliance_endpoint(request: Request):
+            return await self.run_rps_compliance(request)
+
+        @self.app.post("/api/v1/ghg/emissions/analyze")
+        async def analyze_emissions_endpoint(request: Request):
+            return await self.analyze_emissions(request)
+
+        @self.app.post("/api/v1/der/programs/analyze")
+        async def analyze_der_program_endpoint(request: Request):
+            return await self.analyze_der_program(request)
+
+        @self.app.post("/api/v1/ra/reliability/analyze")
+        async def analyze_reliability_endpoint(request: Request):
+            return await self.analyze_reliability(request)
+
+        @self.app.post("/api/v1/rights/valuation")
+        async def value_rights_endpoint(request: Request):
+            return await self.value_rights(request)
+
+        @self.app.post("/api/v1/reports/generate")
+        async def generate_report_endpoint(request: Request):
+            return await self.generate_report(request)
+
+        @self.app.post("/api/v1/tasks/rftps")
+        async def create_rftp_endpoint(request: Request):
+            return await self.create_rftp(request)
+
+    # ===== NORTH AMERICA MARKET APIs =====
+
+    async def create_irp_case(self, request: Request):
+        """Create a new IRP case."""
+        try:
+            body = await request.json()
+            # Validate required fields
+            required_fields = ["name", "market", "scenario", "portfolio"]
+            for field in required_fields:
+                if field not in body:
+                    raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for IRP access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "irp:create",
+                {"market": body["market"]}
+            )
+
+            # Forward to IRP service
+            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
+            case_response = await self._forward_request(
+                f"{irp_service_url}/cases",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return case_response
+
+        except Exception as e:
+            self.logger.error("IRP case creation error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def list_irp_cases(self, request: Request):
+        """List IRP cases with optional filtering."""
+        try:
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for IRP access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "irp:read"
+            )
+
+            # Parse query parameters
+            market = request.query_params.get("market")
+            status = request.query_params.get("status")
+
+            # Forward to IRP service
+            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
+            url = f"{irp_service_url}/cases"
+            if market or status:
+                url += "?"
+                params = []
+                if market:
+                    params.append(f"market={market}")
+                if status:
+                    params.append(f"status={status}")
+                url += "&".join(params)
+
+            cases_response = await self._forward_request(
+                url,
+                "GET",
+                None,
+                auth_info["token"]
+            )
+
+            return cases_response
+
+        except Exception as e:
+            self.logger.error("IRP cases listing error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def get_irp_case(self, case_id: str, request: Request):
+        """Get details for a specific IRP case."""
+        try:
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for IRP access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "irp:read"
+            )
+
+            # Forward to IRP service
+            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
+            case_response = await self._forward_request(
+                f"{irp_service_url}/cases/{case_id}",
+                "GET",
+                None,
+                auth_info["token"]
+            )
+
+            return case_response
+
+        except Exception as e:
+            self.logger.error("IRP case retrieval error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def run_rps_compliance(self, request: Request):
+        """Run RPS/CES compliance analysis."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for RPS access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "rps:analyze"
+            )
+
+            # Forward to RPS service
+            rps_service_url = self.config.rps_service_url or "http://service-rps:8000"
+            compliance_response = await self._forward_request(
+                f"{rps_service_url}/compliance",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return compliance_response
+
+        except Exception as e:
+            self.logger.error("RPS compliance analysis error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def analyze_emissions(self, request: Request):
+        """Analyze GHG emissions for a market and time period."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for GHG access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "ghg:analyze"
+            )
+
+            # Forward to GHG service
+            ghg_service_url = self.config.ghg_service_url or "http://service-ghg:8000"
+            emissions_response = await self._forward_request(
+                f"{ghg_service_url}/emissions/analyze",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return emissions_response
+
+        except Exception as e:
+            self.logger.error("GHG emissions analysis error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def analyze_der_program(self, request: Request):
+        """Analyze DER program economics and requirements."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for DER access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "der:analyze"
+            )
+
+            # Forward to DER service
+            der_service_url = self.config.der_service_url or "http://service-der:8000"
+            der_response = await self._forward_request(
+                f"{der_service_url}/programs/analyze",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return der_response
+
+        except Exception as e:
+            self.logger.error("DER program analysis error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def analyze_reliability(self, request: Request):
+        """Analyze resource adequacy and reliability metrics."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for RA access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "ra:analyze"
+            )
+
+            # Forward to RA service
+            ra_service_url = self.config.ra_service_url or "http://service-ra:8000"
+            reliability_response = await self._forward_request(
+                f"{ra_service_url}/reliability/analyze",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return reliability_response
+
+        except Exception as e:
+            self.logger.error("Reliability analysis error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def value_rights(self, request: Request):
+        """Value transmission rights portfolio."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for rights access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "rights:analyze"
+            )
+
+            # Forward to rights service
+            rights_service_url = self.config.rights_service_url or "http://service-rights:8000"
+            rights_response = await self._forward_request(
+                f"{rights_service_url}/rights/valuation",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return rights_response
+
+        except Exception as e:
+            self.logger.error("Rights valuation error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def generate_report(self, request: Request):
+        """Generate regulatory or board report."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for reports access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "reports:generate"
+            )
+
+            # Forward to reports service
+            reports_service_url = self.config.reports_service_url or "http://service-reports:8000"
+            report_response = await self._forward_request(
+                f"{reports_service_url}/reports/generate",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return report_response
+
+        except Exception as e:
+            self.logger.error("Report generation error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def create_rftp(self, request: Request):
+        """Create a Request for Task Proposal (RFTP)."""
+        try:
+            body = await request.json()
+
+            # Authenticate and authorize
+            auth_info = await self.auth_middleware.authenticate_request(request)
+            user_info = auth_info["user_info"]
+
+            # Check entitlements for tasks access
+            await self.entitlements_client.check_access(
+                user_info["tenant_id"],
+                "tasks:create"
+            )
+
+            # Forward to tasks service
+            tasks_service_url = self.config.tasks_service_url or "http://service-tasks:8000"
+            rftp_response = await self._forward_request(
+                f"{tasks_service_url}/rftps",
+                "POST",
+                body,
+                auth_info["token"]
+            )
+
+            return rftp_response
+
+        except Exception as e:
+            self.logger.error("RFTP creation error", error=str(e))
+            if isinstance(e, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+    async def _forward_request(self, url: str, method: str, body: Any, token: str):
+        """Forward request to downstream service with authentication."""
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        async with httpx.AsyncClient() as client:
+            if method == "GET":
+                response = await client.get(url, headers=headers, timeout=30.0)
+            elif method == "POST":
+                response = await client.post(url, json=body, headers=headers, timeout=30.0)
+            else:
+                raise HTTPException(status_code=405, detail="Method not allowed")
+
+            if response.status_code >= 400:
+                error_detail = response.text
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Downstream service error: {error_detail}"
+                )
+
+            return response.json()
+
     async def _check_dependencies(self):
         """Check gateway dependencies."""
         dependencies = {}

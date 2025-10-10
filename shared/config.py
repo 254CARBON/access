@@ -44,12 +44,23 @@ class BaseConfig(BaseSettings):
     clickhouse_url: str = Field(default="http://localhost:8123", env="ACCESS_CLICKHOUSE_URL")
     postgres_dsn: str = Field(default="postgres://localhost:5432/access", env="ACCESS_POSTGRES_DSN")
     kafka_bootstrap: str = Field(default="localhost:9092", env="ACCESS_KAFKA_BOOTSTRAP")
+    cache_warm_concurrency: int = Field(default=5, env="ACCESS_CACHE_WARM_CONCURRENCY")
     
     # Internal services
     auth_service_url: str = Field(default="http://localhost:8010", env="ACCESS_AUTH_SERVICE_URL")
     entitlements_service_url: str = Field(default="http://localhost:8011", env="ACCESS_ENTITLEMENTS_SERVICE_URL")
     metrics_service_url: str = Field(default="http://localhost:8012", env="ACCESS_METRICS_SERVICE_URL")
     projection_service_url: str = Field(default="http://localhost:8085", env="ACCESS_PROJECTION_SERVICE_URL")
+
+    # North America market services
+    irp_service_url: str = Field(default="http://service-irpcore:8000", env="ACCESS_IRP_SERVICE_URL")
+    rps_service_url: str = Field(default="http://service-rps:8000", env="ACCESS_RPS_SERVICE_URL")
+    ghg_service_url: str = Field(default="http://service-ghg:8000", env="ACCESS_GHG_SERVICE_URL")
+    der_service_url: str = Field(default="http://service-der:8000", env="ACCESS_DER_SERVICE_URL")
+    ra_service_url: str = Field(default="http://service-ra:8000", env="ACCESS_RA_SERVICE_URL")
+    rights_service_url: str = Field(default="http://service-rights:8000", env="ACCESS_RIGHTS_SERVICE_URL")
+    reports_service_url: str = Field(default="http://service-reports:8000", env="ACCESS_REPORTS_SERVICE_URL")
+    tasks_service_url: str = Field(default="http://service-tasks:8000", env="ACCESS_TASKS_SERVICE_URL")
     
     # Observability
     enable_tracing: bool = Field(default=False, env="ACCESS_ENABLE_TRACING")

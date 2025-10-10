@@ -4,6 +4,7 @@ Unit tests for Gateway main service.
 
 import pytest
 import json
+import asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
@@ -292,7 +293,14 @@ class TestGatewayService:
         mock_auth.return_value = mock_user_info
 
         # Mock cache warming
-        mock_warm_cache.return_value = True
+        mock_warm_cache.return_value = {
+            "tenant_id": mock_user_info["tenant_id"],
+            "user_id": mock_user_info["user_id"],
+            "planned": {"latest_price": 1, "curve_snapshot": 0, "custom": 0},
+            "warmed": {"latest_price": 1, "curve_snapshot": 0, "custom": 0},
+            "misses": 0,
+            "errors": [],
+        }
 
         headers = {"Authorization": "Bearer test-token"}
         response = client.post("/api/v1/cache/warm", headers=headers)
@@ -301,6 +309,7 @@ class TestGatewayService:
         data = response.json()
         assert data["message"] == "Cache warmed successfully"
         assert data["user"] == "user-123"
+        assert data["summary"]["warmed"]["latest_price"] == 1
 
     def test_service_initialization(self, gateway_service):
         """Test service initialization."""
@@ -337,7 +346,7 @@ class TestGatewayService:
             "entitlements": "ok"
         }
 
-        dependencies = gateway_service._check_dependencies()
+        dependencies = asyncio.run(gateway_service._check_dependencies())
         assert dependencies["redis"] == "ok"
         assert dependencies["auth"] == "ok"
         assert dependencies["entitlements"] == "ok"

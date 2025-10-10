@@ -489,6 +489,50 @@ kubectl logs <pod-name> -n 254carbon-access | grep "specific_text"
 - [ ] Capacity planning
 - [ ] Disaster recovery testing
 
+<a name="gateway-cache-warm"></a>
+### Cache Warm & Served Replay
+
+#### 1. Trigger Cache Warm After Deploy or Flush
+```bash
+cd access
+./scripts/warm_served_cache.py \
+  --tenant tenant-1 \
+  --user oncall-cache-warm \
+  --redis-url $ACCESS_REDIS_URL \
+  --projection-url $ACCESS_PROJECTION_SERVICE_URL
+```
+- Use `--dry-run` to inspect the warm plan without writing to Redis.
+- Override the query ranking for experiments with `--hot-queries-file /tmp/hot_queries.json`.
+
+#### 2. Verify Warm Completion
+- Check CLI summary output for `errors: []` and warmed counts > 0.
+- Grafana Dashboard: **Gateway Served Cache** (`gateway_served_cache.json`) panels should show:
+  - `gateway_served_cache_warm_total` increasing with `result="hit"`.
+  - `gateway_served_projection_age_seconds` p95 below 60 s for latest prices and 10 min for curves.
+- Prometheus query to spot failures:
+  ```
+  increase(gateway_served_cache_warm_total{result="error"}[5m])
+  ```
+
+#### 3. Historical Replay / Backfill
+Wenn projections are stale for a tenant:
+```bash
+../data-processing/scripts/backfill_window.py \
+  --from 2025-09-01 \
+  --to 2025-09-07 \
+  --tenant tenant-1
+```
+- Wait for backfill jobs to complete (monitor Kafka topic lag).
+- Re-run the cache warm script for the affected tenant to refresh Redis entries.
+
+#### 4. Update Hot Query Rankings (Optional)
+```bash
+cp access/service_gateway/app/caching/data/hot_served_queries.json /tmp/hot_queries.json
+# edit weights / add instruments as required
+./scripts/warm_served_cache.py --tenant tenant-1 --hot-queries-file /tmp/hot_queries.json --dry-run
+```
+- Submit changes to the canonical JSON file via PR once validated.
+
 ### Backup Procedures
 
 #### 1. Database Backup

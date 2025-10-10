@@ -155,6 +155,29 @@ class MetricsCollector:
             ["cache_type"],
             registry=None
         )
+
+        self._metrics["served_cache_warm_total"] = Counter(
+            "gateway_served_cache_warm_total",
+            "Total served cache warm operations",
+            ["projection_type", "result"],
+            registry=None
+        )
+
+        self._metrics["served_cache_warm_duration_seconds"] = Histogram(
+            "gateway_served_cache_warm_duration_seconds",
+            "Duration of served cache warm operations",
+            ["projection_type"],
+            registry=None,
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10)
+        )
+
+        self._metrics["served_projection_age_seconds"] = Histogram(
+            "gateway_served_projection_age_seconds",
+            "Age of served projections when cached",
+            ["projection_type"],
+            registry=None,
+            buckets=(5, 15, 30, 60, 120, 300, 600, 1200, 3600)
+        )
     
     def _setup_streaming_metrics(self):
         """Set up streaming-specific metrics."""

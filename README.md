@@ -47,6 +47,21 @@ Secrets and environment values live in the respective `k8s/overlays/*` directori
 - Confirm Keycloak JWKS freshness: `curl $ACCESS_JWKS_URL` should return current keys.
 - Inspect Redis connection stats: `redis-cli info clients` (port-forward if remote).
 
+### Cache Warm & Served Replay
+- Pre-seed Redis for hot served queries after deploys or cache flushes:
+  ```
+  ./scripts/warm_served_cache.py --tenant tenant-1 --user deploy-bot \
+    --redis-url $ACCESS_REDIS_URL \
+    --projection-url $ACCESS_PROJECTION_SERVICE_URL
+  ```
+  Use `--dry-run` to view the plan without writing keys and `--hot-queries-file` to test alternate rankings.
+- Monitor warm effectiveness via Grafana dashboard `gateway_served_cache.json` (see Observability) and Prometheus metric `gateway_served_cache_warm_total`.
+- Run historical replay/backfill when a tenant misses projections:
+  ```
+  ../data-processing/scripts/backfill_window.py --from 2025-09-01 --to 2025-09-07 --tenant tenant-1
+  ```
+  Follow with a cache warm to avoid cold-start latency on newly backfilled curves.
+
 ### Deployments
 1. Sync contracts: `make spec-sync`; run `make contract-check`.
 2. Run test suite and lint: `make test && make lint`.
@@ -88,6 +103,8 @@ Secrets and environment values live in the respective `k8s/overlays/*` directori
 | `ACCESS_JWKS_URL` | Keycloak JWKS endpoint | `http://keycloak:8080/...` | Mandatory for auth and streaming. |
 | `ACCESS_POSTGRES_DSN` | Entitlements metadata store | `postgres://access:access@postgres:5432/access` | Provide via secret in non-local envs. |
 | `ACCESS_REDIS_URL` | Cache for sessions, entitlements, rate limits | `redis://redis:6379/0` | TLS supported with `ACCESS_REDIS_SSL_ENABLED=true`. |
+| `ACCESS_CACHE_WARM_CONCURRENCY` | Concurrent served cache warm operations | `5` | Increase if projection service can tolerate higher fan-out. |
+| `ACCESS_HOT_SERVED_QUERIES_FILE` | Override path for curated hot query rankings | `app/caching/data/hot_served_queries.json` | Accepts absolute path; useful for experiments. |
 | `ACCESS_KAFKA_BOOTSTRAP` | Kafka brokers for streaming service | `kafka:9092` | Configure SASL/TLS if required. |
 | `ACCESS_METRICS_SERVICE_URL` | Metrics ingestion endpoint | `http://metrics-service:8012` | Gateway/streaming push counters here. |
 | `ACCESS_ENABLE_TRACING` | Enable OTEL instrumentation | `false` (local) | Exporter set via `ACCESS_OTEL_EXPORTER`. |
@@ -99,10 +116,11 @@ Secrets such as `ACCESS_JWT_SECRET_KEY`, `ACCESS_API_*`, and Keycloak client cre
 
 ## Observability
 - Metrics exposed via `/metrics` on each service; Prometheus targets configured in `k8s/monitoring/`.
-- Grafana dashboards stored at `../observability/dashboards/access/gateway_overview.json`.
+- Grafana dashboards stored at `../observability/dashboards/access/gateway_overview.json` and `../observability/dashboards/access/gateway_served_cache.json`.
 - Alerts managed in `../observability/alerts/RED/gateway_red.yaml` and `../observability/alerts/SLO/api_latency_slo.yaml`.
 - Logs are structured JSON (stdout). Access with `kubectl logs -l app=gateway -n access`. Loki integration is pending.
 - Traces tagged with `service.name=254carbon-gateway` / `254carbon-streaming`; view in Tempo/Jaeger filtered by `client.address`.
+- Key metrics for served performance: `gateway_served_cache_warm_total`, `gateway_served_cache_warm_duration_seconds`, and `gateway_served_projection_age_seconds`.
 
 ---
 

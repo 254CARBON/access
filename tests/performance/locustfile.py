@@ -19,6 +19,23 @@ from locust import HttpUser, TaskSet, task, between, events
 from locust.exception import StopUser
 
 
+SERVED_LATEST_INSTRUMENTS = [
+    "NG_HH_BALMO",
+    "ERCOT_HOUSTON_15MIN",
+    "NBP_GAS_DA",
+    "EU_POWER_PHELIX",
+    "WTI_CRUDE_FRONT",
+]
+
+SERVED_CURVE_TARGETS = [
+    ("NG_HH_BALMO", "1m"),
+    ("ERCOT_HOUSTON_15MIN", "da"),
+    ("NBP_GAS_DA", "2w"),
+    ("EU_POWER_PHELIX", "1q"),
+    ("WTI_CRUDE_FRONT", "3m"),
+]
+
+
 class GatewayRESTTasks(TaskSet):
     """Load tests for Gateway Service REST endpoints."""
     
@@ -161,6 +178,47 @@ class GatewayRESTTasks(TaskSet):
                     response.failure("Missing message in response")
             elif response.status_code == 429:
                 response.failure("Rate limited")
+            else:
+                response.failure(f"Unexpected status code: {response.status_code}")
+
+    @task(2)
+    def get_served_latest_price(self):
+        """Exercise served latest price endpoint."""
+        instrument = random.choice(SERVED_LATEST_INSTRUMENTS)
+        with self.client.get(
+            f"/api/v1/served/latest-price/{instrument}",
+            headers=self.headers,
+            catch_response=True,
+        ) as response:
+            if response.status_code == 200:
+                payload = response.json()
+                if "projection" in payload:
+                    response.success()
+                else:
+                    response.failure("Missing projection in latest price response")
+            elif response.status_code == 404:
+                response.failure("Served latest price not found")
+            else:
+                response.failure(f"Unexpected status code: {response.status_code}")
+
+    @task(2)
+    def get_served_curve_snapshot(self):
+        """Exercise served curve snapshot endpoint."""
+        instrument_id, horizon = random.choice(SERVED_CURVE_TARGETS)
+        with self.client.get(
+            f"/api/v1/served/curve-snapshots/{instrument_id}",
+            headers=self.headers,
+            params={"horizon": horizon},
+            catch_response=True,
+        ) as response:
+            if response.status_code == 200:
+                payload = response.json()
+                if "projection" in payload:
+                    response.success()
+                else:
+                    response.failure("Missing projection in curve snapshot response")
+            elif response.status_code == 404:
+                response.failure("Served curve snapshot not found")
             else:
                 response.failure(f"Unexpected status code: {response.status_code}")
 

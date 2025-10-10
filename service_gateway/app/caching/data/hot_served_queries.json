@@ -1,0 +1,116 @@
+{
+  "metadata": {
+    "generated_at": "2025-10-12T12:00:00Z",
+    "source": [
+      "prometheus:gateway_served_projection_requests_total",
+      "k6:gateway-api-test",
+      "synthetic:curated_hot_queries_v2"
+    ],
+    "description": "Pre-ranked served queries used to warm Redis caches for low-latency reads."
+  },
+  "latest_price": {
+    "description": "Top latest price lookups by tenant and instrument over trailing 24h.",
+    "ttl_seconds": 45,
+    "max_entries": 50,
+    "entries": [
+      {
+        "tenant_id": "tenant-1",
+        "instrument_id": "NG_HH_BALMO",
+        "weight": 0.23,
+        "source": "prometheus",
+        "notes": "Henry Hub natural gas balance-of-month"
+      },
+      {
+        "tenant_id": "tenant-1",
+        "instrument_id": "ERCOT_HOUSTON_15MIN",
+        "weight": 0.17,
+        "source": "prometheus",
+        "notes": "ERCOT Houston 15-minute power price"
+      },
+      {
+        "tenant_id": "tenant-2",
+        "instrument_id": "NBP_GAS_DA",
+        "weight": 0.16,
+        "source": "k6",
+        "notes": "UK NBP gas day-ahead benchmark"
+      },
+      {
+        "tenant_id": "tenant-3",
+        "instrument_id": "EU_POWER_PHELIX",
+        "weight": 0.12,
+        "source": "synthetic",
+        "notes": "Continental power benchmark"
+      },
+      {
+        "tenant_id": "*",
+        "instrument_id": "WTI_CRUDE_FRONT",
+        "weight": 0.09,
+        "source": "prometheus",
+        "notes": "WTI crude front month, shared across tenants",
+        "ttl_seconds": 60
+      }
+    ]
+  },
+  "curve_snapshot": {
+    "description": "Top curve snapshot requests by tenant, instrument and horizon.",
+    "ttl_seconds": 600,
+    "max_entries": 40,
+    "entries": [
+      {
+        "tenant_id": "tenant-1",
+        "instrument_id": "NG_HH_BALMO",
+        "horizon": "1M",
+        "weight": 0.28,
+        "source": "prometheus",
+        "notes": "Monthly forward curve for Henry Hub"
+      },
+      {
+        "tenant_id": "tenant-1",
+        "instrument_id": "ERCOT_HOUSTON_15MIN",
+        "horizon": "DA",
+        "weight": 0.19,
+        "source": "k6",
+        "notes": "Day-ahead curve for ERCOT Houston"
+      },
+      {
+        "tenant_id": "tenant-2",
+        "instrument_id": "NBP_GAS_DA",
+        "horizon": "2W",
+        "weight": 0.15,
+        "source": "prometheus",
+        "notes": "Two-week forward curve for UK NBP gas"
+      },
+      {
+        "tenant_id": "tenant-3",
+        "instrument_id": "EU_POWER_PHELIX",
+        "horizon": "1Q",
+        "weight": 0.11,
+        "source": "synthetic",
+        "notes": "Quarterly curve for continental power"
+      },
+      {
+        "tenant_id": "*",
+        "instrument_id": "WTI_CRUDE_FRONT",
+        "horizon": "3M",
+        "weight": 0.08,
+        "source": "prometheus",
+        "notes": "WTI forward curve shared across tenants",
+        "ttl_seconds": 900
+      }
+    ]
+  },
+  "custom": {
+    "description": "Custom projection lookups (e.g., volatility surfaces) currently tracked.",
+    "ttl_seconds": 900,
+    "max_entries": 10,
+    "entries": [
+      {
+        "tenant_id": "tenant-2",
+        "projection_type": "vol_surface",
+        "instrument_id": "NBP_GAS_DA",
+        "weight": 0.05,
+        "source": "synthetic"
+      }
+    ]
+  }
+}
