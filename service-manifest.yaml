@@ -1,0 +1,75 @@
+## Domain Manifest: Access
+domain: access
+version: 0.2.0
+description: >
+  Gateway, streaming, auth, and metrics services that expose market data and
+  operational endpoints to external consumers while enforcing policy.
+owner: platform
+product_manager: TBD
+maturity: beta
+runtime_stack:
+  primary: python
+  secondary: nodejs
+services:
+  - name: gateway
+    manifest: service_gateway/service-manifest.yaml
+    contracts:
+      openapi:
+        - specs/openapi/access/gateway.openapi.yaml
+    consumes_events:
+      - normalized.market.ticks.v1
+    produces_events:
+      - metrics.request.count.v1
+  - name: streaming
+    manifest: service_streaming/service-manifest.yaml
+    contracts:
+      asyncapi:
+        - specs/asyncapi/market-ticks.yaml
+    consumes_events:
+      - normalized.market.ticks.v1
+  - name: auth
+    manifest: service_auth/service-manifest.yaml
+    contracts:
+      openapi: []
+    consumes_events: []
+  - name: entitlements
+    manifest: service_entitlements/service-manifest.yaml
+    contracts:
+      openapi: []
+    consumes_events: []
+  - name: metrics
+    manifest: service_metrics/service-manifest.yaml
+    contracts:
+      openapi: []
+    consumes_events:
+      - metrics.request.count.v1
+contracts:
+  openapi:
+    - id: gateway
+      file: specs/openapi/access/gateway.openapi.yaml
+      version: 0.2.0
+  asyncapi:
+    - id: market-ticks
+      file: specs/asyncapi/market-ticks.yaml
+      version: 0.2.0
+  events_consumed:
+    - name: normalized.market.ticks.v1
+      schema: ../specs/events/market/normalized.market.ticks.v1.avsc
+dependencies:
+  platforms:
+    - redis@>=7
+    - kafka@>=3.5
+    - clickhouse@>=23
+  shared_services:
+    - security
+    - observability
+security:
+  boundary: external
+  rate_limiting: true
+  mtls: planned
+observability:
+  dashboards:
+    - grafana/access-edge
+  alerts:
+    - gateway-latency
+    - streaming-delivery-lag
