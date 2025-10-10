@@ -6,6 +6,8 @@ import sys
 import os
 import time
 import asyncio
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 # Add shared directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -15,16 +17,20 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 from shared.base_service import BaseService
 from shared.config import get_config
 from shared.observability import get_observability_manager, observe_function, observe_operation
-from shared.errors import ExternalServiceError
+from shared.errors import ExternalServiceError, AuthenticationError
 from adapters.auth_client import AuthClient
 from adapters.entitlements_client import EntitlementsClient
 from adapters.served_data_client import ServedDataClient
+from adapters.clickhouse_client import ClickHouseClient
 from domain.auth_middleware import AuthMiddleware
 from caching.cache_manager import CacheManager
 from ratelimit.token_bucket import TokenBucketRateLimiter, RateLimitMiddleware
 from shared.circuit_breaker import circuit_breaker_manager
-from fastapi import Depends, HTTPException, Request, Header, Query
+from fastapi import Depends, HTTPException, Request, Header, Query, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from auth import JWKSAuthenticator
+from market_data import MarketDataService
 
 
 class GatewayService(BaseService):
@@ -39,6 +45,30 @@ class GatewayService(BaseService):
         self.cache_manager = CacheManager(self.config.redis_url)
         self.rate_limiter = TokenBucketRateLimiter(self.config.redis_url)
         self.rate_limit_middleware = RateLimitMiddleware(self.rate_limiter)
+        self.rate_limiter.default_limits.setdefault("market_data", 600)
+
+        self.jwks_authenticator = JWKSAuthenticator(
+            self.config.jwks_url,
+            audience=os.getenv("ACCESS_JWKS_AUDIENCE"),
+            issuer=os.getenv("ACCESS_JWKS_ISSUER"),
+            required_role=os.getenv("ACCESS_REQUIRED_ROLE", "marketdata:read"),
+        )
+        self.clickhouse_client = ClickHouseClient(self.config.clickhouse_url)
+        cache_ttl_env = os.getenv("ACCESS_LATEST_TICK_CACHE_TTL", "5")
+        try:
+            cache_ttl = int(cache_ttl_env)
+        except ValueError:
+            cache_ttl = 5
+            self.logger.warning(
+                "Invalid ACCESS_LATEST_TICK_CACHE_TTL value, falling back to default",
+                value=cache_ttl_env,
+            )
+
+        self.market_data_service = MarketDataService(
+            self.config.redis_url,
+            self.clickhouse_client,
+            cache_ttl_seconds=cache_ttl,
+        )
         
         # Initialize observability
         otel_exporter = self.config.otel_exporter if self.config.enable_tracing else None
@@ -57,11 +87,95 @@ class GatewayService(BaseService):
             "service-key-789": {"tenant_id": "*", "roles": ["service"]}
         }
         
+        @self.app.on_event("startup")
+        async def _startup():
+            await self.jwks_authenticator.warmup()
+
+        @self.app.on_event("shutdown")
+        async def _shutdown():
+            await self.market_data_service.close()
+            await self.jwks_authenticator.close()
+            await self.clickhouse_client.close()
+
         self._setup_gateway_routes()
         self._setup_observability_middleware()
 
         # Expose service instance via app state for introspection/testing
         self.app.state.gateway_service = self
+
+    async def _enforce_rate_limit(self, request: Request, subject: str, endpoint: str) -> Dict[str, Any]:
+        """Check the token bucket rate limiter for the caller."""
+        client_ip = self._get_client_ip(request)
+        client_id = f"{client_ip}:{subject}"
+        result = await self.rate_limiter.check_rate_limit(client_id, endpoint, "market_data")
+
+        if not result.get("allowed", False):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "Rate limit exceeded",
+                    "limit": result.get("limit"),
+                    "current_count": result.get("current_count"),
+                    "reset_in_seconds": result.get("reset_in_seconds"),
+                }
+            )
+        return result
+
+    def _set_rate_limit_headers(self, response: Response, rate_result: Dict[str, Any]) -> None:
+        """Propagate rate limiting metadata via standard headers."""
+        limit = rate_result.get("limit")
+        remaining = rate_result.get("remaining")
+        reset = rate_result.get("reset_in_seconds")
+
+        if limit is not None:
+            response.headers["X-RateLimit-Limit"] = str(limit)
+        if remaining is not None:
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
+        if reset is not None:
+            response.headers["X-RateLimit-Reset"] = str(reset)
+
+    def _get_client_ip(self, request: Request) -> str:
+        """Extract the caller IP from standard headers."""
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
+        if request.client:
+            return request.client.host
+        return "unknown"
+
+    def _parse_iso_datetime(self, value: str, *, field: str) -> datetime:
+        """Parse ISO-8601 strings with Z or offset suffixes."""
+        candidate = value.strip()
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+
+        if "T" not in candidate and " " in candidate:
+            candidate = candidate.replace(" ", "T", 1)
+        elif " " in candidate and "+" not in candidate and "T" in candidate:
+            head, tail = candidate.rsplit(" ", 1)
+            candidate = f"{head}+{tail}"
+
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid {field} timestamp") from exc
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed
+
+    def _format_iso(self, value: datetime) -> str:
+        """Format datetime values as ISO-8601 strings with millisecond precision."""
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     
     def _setup_observability_middleware(self):
         """Set up observability middleware."""
@@ -128,6 +242,115 @@ class GatewayService(BaseService):
     
     def _setup_gateway_routes(self):
         """Set up gateway-specific routes."""
+
+        @self.app.get("/healthz")
+        async def healthz():
+            """Lightweight liveness endpoint with dependency status."""
+            dependencies = await self._check_dependencies()
+            status = "ok" if all(value == "ok" for value in dependencies.values()) else "error"
+            return {
+                "service": "gateway",
+                "status": status,
+                "dependencies": dependencies,
+                "timestamp": self._format_iso(datetime.now(timezone.utc)),
+            }
+
+        @self.app.get("/ticks/latest")
+        async def get_latest_tick(
+            request: Request,
+            response: Response,
+            symbol: str = Query(..., min_length=1),
+            market: Optional[str] = Query(None, min_length=1),
+        ):
+            """Return the latest normalized tick for the requested symbol."""
+            try:
+                auth_context = await self.jwks_authenticator.authenticate(request)
+            except AuthenticationError as exc:
+                raise HTTPException(status_code=401, detail=exc.message)
+
+            try:
+                rate_result = await self._enforce_rate_limit(request, auth_context.subject, "/ticks/latest")
+                self._set_rate_limit_headers(response, rate_result)
+            except HTTPException:
+                raise
+
+            try:
+                tick, source = await self.market_data_service.get_latest_tick(
+                    auth_context.tenant_id,
+                    symbol,
+                    market=market,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            if not tick:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No tick available for symbol '{symbol}'",
+                )
+
+            payload = tick.to_dict()
+            payload["source"] = source
+            payload["cached"] = source == "redis"
+            payload["tenant_id"] = tick.tenant_id
+            return payload
+
+        @self.app.get("/ticks/window")
+        async def get_tick_window(
+            request: Request,
+            response: Response,
+            symbol: str = Query(..., min_length=1),
+            start: str = Query(..., description="Inclusive ISO-8601 start timestamp"),
+            end: str = Query(..., description="Exclusive ISO-8601 end timestamp"),
+            market: Optional[str] = Query(None, min_length=1),
+        ):
+            """Return all ticks inside the requested time window."""
+            try:
+                auth_context = await self.jwks_authenticator.authenticate(request)
+            except AuthenticationError as exc:
+                raise HTTPException(status_code=401, detail=exc.message)
+
+            start_dt = self._parse_iso_datetime(start, field="start")
+            end_dt = self._parse_iso_datetime(end, field="end")
+
+            if start_dt >= end_dt:
+                raise HTTPException(status_code=400, detail="start must be earlier than end")
+
+            rate_result = await self._enforce_rate_limit(request, auth_context.subject, "/ticks/window")
+            self._set_rate_limit_headers(response, rate_result)
+
+            try:
+                ticks = await self.market_data_service.get_tick_window(
+                    auth_context.tenant_id,
+                    symbol,
+                    start_dt,
+                    end_dt,
+                    market=market,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+            if not ticks:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No ticks found for requested window",
+                )
+
+            result: Dict[str, Any] = {
+                "symbol": symbol,
+                "tenant_id": auth_context.tenant_id,
+                "start": self._format_iso(start_dt),
+                "end": self._format_iso(end_dt),
+                "count": len(ticks),
+                "ticks": [tick.to_dict() for tick in ticks],
+                "source": "clickhouse",
+            }
+
+            if market:
+                result["market"] = market
+            return result
         
         @self.app.get("/")
         async def root():
@@ -890,37 +1113,16 @@ class GatewayService(BaseService):
                 self.logger.error("API key authentication error", error=str(e))
                 raise HTTPException(status_code=500, detail="Authentication error")
     
-    def _check_dependencies(self):
+    async def _check_dependencies(self):
         """Check gateway dependencies."""
         dependencies = {}
-        
-        # Check Redis
-        try:
-            import redis
-            r = redis.Redis.from_url(self.config.redis_url)
-            r.ping()
-            dependencies["redis"] = "ok"
-        except Exception:
-            dependencies["redis"] = "error"
-        
-        # Check auth service
-        try:
-            import httpx
-            with httpx.Client(timeout=5.0) as client:
-                response = client.get(f"{self.config.auth_service_url}/health")
-            dependencies["auth"] = "ok" if response.status_code == 200 else "error"
-        except Exception:
-            dependencies["auth"] = "error"
-        
-        # Check entitlements service
-        try:
-            import httpx
-            with httpx.Client(timeout=5.0) as client:
-                response = client.get(f"{self.config.entitlements_service_url}/health")
-            dependencies["entitlements"] = "ok" if response.status_code == 200 else "error"
-        except Exception:
-            dependencies["entitlements"] = "error"
-        
+
+        dependencies["redis"] = "ok" if await self.market_data_service.check_redis() else "error"
+        dependencies["clickhouse"] = "ok" if await self.market_data_service.check_clickhouse() else "error"
+        dependencies["jwks"] = await self.jwks_authenticator.check_health()
+
+        # Rate limiter shares Redis, reuse status to avoid duplicate checks
+        dependencies["rate_limit_store"] = dependencies["redis"]
         return dependencies
 
 
