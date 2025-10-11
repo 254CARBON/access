@@ -2,7 +2,7 @@
   "version": "1.0.0",
   "last_updated": "2025-01-27T00:00:00Z",
   "contracts": {
-    "gateway": "gateway-core@1.0.0",
+    "gateway": "access-gateway@0.3.0",
     "streaming": "streaming-core@1.0.0",
     "auth": "auth-core@1.0.0",
     "entitlements": "entitlements-core@1.0.0",

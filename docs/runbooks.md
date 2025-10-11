@@ -584,6 +584,38 @@ kubectl exec -it deployment/<service-name> -n 254carbon-access -- apt update && 
 
 ## Security Procedures
 
+### JWT Rotation
+
+Use this procedure to rotate JWT signing keys and JWKS for the access layer.
+
+1. Update identity provider keys
+   - Rotate the Keycloak client secret or update the JWKS key set as required.
+   - Confirm JWKS publishes the new key: `curl -s $ACCESS_JWKS_URL | jq '.'`.
+
+2. Update Kubernetes secrets
+```bash
+kubectl create secret generic access-secrets-rotated \
+  --from-literal=ACCESS_JWKS_URL="$ACCESS_JWKS_URL" \
+  --from-literal=ACCESS_JWT_SECRET_KEY="<optional-fallback-secret>" \
+  -n 254carbon-access --dry-run=client -o yaml | kubectl apply -f -
+```
+
+3. Restart edge services to pick up new keys
+```bash
+kubectl rollout restart deployment/auth -n 254carbon-access
+kubectl rollout restart deployment/gateway -n 254carbon-access
+kubectl rollout restart deployment/streaming -n 254carbon-access
+```
+
+4. Verify
+```bash
+# Validate JWKS fetch succeeded (look for refresh logs)
+kubectl logs deploy/auth -n 254carbon-access | tail -n 200 | grep -i jwks
+
+# Exercise a signed token against the gateway
+curl -s -H "Authorization: Bearer <new-token>" http://<gateway>/health | jq '.'
+```
+
 ### Security Incident Response
 
 #### 1. Initial Assessment

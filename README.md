@@ -42,7 +42,7 @@ Secrets and environment values live in the respective `k8s/overlays/*` directori
 ## Runbook
 
 ### Daily Checks
-- `make smoke` (local) or `kubectl get pods -n access` – verify gateway, streaming, auth, entitlements, metrics pods healthy.
+- `make smoke` (local) or `kubectl get pods -n 254carbon-access` – verify gateway, streaming, auth, entitlements, metrics pods healthy.
 - Grafana dashboard `../observability/dashboards/access/gateway_overview.json` – confirm p95 latency <150 ms, 5xx rate near zero, cache hit ratio healthy.
 - Confirm Keycloak JWKS freshness: `curl $ACCESS_JWKS_URL` should return current keys.
 - Inspect Redis connection stats: `redis-cli info clients` (port-forward if remote).
@@ -68,7 +68,7 @@ Secrets and environment values live in the respective `k8s/overlays/*` directori
 3. Build images: `make buildx SERVICE=<svc> VERSION=<tag>` for each changed service.
 4. Update corresponding `service-*/service-manifest.yaml` with new version.
 5. Apply changes: `kubectl apply -k k8s/overlays/<env>` or merge into GitOps repo.
-6. Post-deploy verification: `kubectl rollout status deployment/gateway -n access` and confirm `/health` includes the new version.
+6. Post-deploy verification: `kubectl rollout status deployment/gateway -n 254carbon-access` and confirm `/health` includes the new version.
 
 ### Incident Response
 - **Auth Failures (401/403 spikes)**  
@@ -76,20 +76,20 @@ Secrets and environment values live in the respective `k8s/overlays/*` directori
   - Flush entitlements cache: `redis-cli --scan --pattern 'entitlement:*' | xargs redis-cli DEL`.  
   - If Keycloak outage persists, enable fallback signing keys (`ACCESS_JWKS_FALLBACK_ENABLED=true`) and restart auth.
 - **Gateway Latency Regression**  
-  - Verify Redis availability (`kubectl exec deployment/gateway -n access -- redis-cli PING`).  
-  - Scale gateway: `kubectl scale deployment/gateway --replicas=3 -n access`.  
+  - Verify Redis availability (`kubectl exec deployment/gateway -n 254carbon-access -- redis-cli PING`).  
+  - Scale gateway: `kubectl scale deployment/gateway --replicas=3 -n 254carbon-access`.  
   - Coordinate with downstream ClickHouse owners if DB latency is root cause.
 - **Streaming Disconnect Storm**  
   - Inspect consumer lag: `kafka-consumer-groups --describe --group streaming-service`.  
-  - Increase pods: `kubectl scale deployment/streaming --replicas=4 -n access`.  
+  - Increase pods: `kubectl scale deployment/streaming --replicas=4 -n 254carbon-access`.  
   - Adjust connection limits (`ACCESS_MAX_WS_CONNECTIONS`, `ACCESS_HEARTBEAT_TIMEOUT`) and redeploy.
 - **Emergency Rollback**  
-  - `kubectl rollout undo deployment/<svc> -n access`.  
+  - `kubectl rollout undo deployment/<svc> -n 254carbon-access`.  
   - Validate previous image tag via `/health` response.  
   - Update GitOps manifests to prevent redeploying the bad revision.
 
 ### On-call Utilities
-- Restart service: `kubectl rollout restart deployment/<svc> -n access`.
+- Restart service: `kubectl rollout restart deployment/<svc> -n 254carbon-access`.
 - Flush rate-limit counters: `redis-cli --scan --pattern 'rl:*' | xargs redis-cli DEL`.
 - Rotate API keys: follow `docs/runbooks.md#jwt-rotation` and re-apply `k8s/secrets.yaml`.
 
@@ -118,7 +118,7 @@ Secrets such as `ACCESS_JWT_SECRET_KEY`, `ACCESS_API_*`, and Keycloak client cre
 - Metrics exposed via `/metrics` on each service; Prometheus targets configured in `k8s/monitoring/`.
 - Grafana dashboards stored at `../observability/dashboards/access/gateway_overview.json` and `../observability/dashboards/access/gateway_served_cache.json`.
 - Alerts managed in `../observability/alerts/RED/gateway_red.yaml` and `../observability/alerts/SLO/api_latency_slo.yaml`.
-- Logs are structured JSON (stdout). Access with `kubectl logs -l app=gateway -n access`. Loki integration is pending.
+- Logs are structured JSON (stdout). Access with `kubectl logs -l app=gateway -n 254carbon-access`. Loki integration is pending.
 - Traces tagged with `service.name=254carbon-gateway` / `254carbon-streaming`; view in Tempo/Jaeger filtered by `client.address`.
 - Key metrics for served performance: `gateway_served_cache_warm_total`, `gateway_served_cache_warm_duration_seconds`, and `gateway_served_projection_age_seconds`.
 
@@ -127,7 +127,7 @@ Secrets such as `ACCESS_JWT_SECRET_KEY`, `ACCESS_API_*`, and Keycloak client cre
 ## Troubleshooting
 
 ### Gateway Returns 500 Errors
-1. `kubectl logs deployment/gateway -n access` – check stack trace.
+1. `kubectl logs deployment/gateway -n 254carbon-access` – check stack trace.
 2. Confirm dependencies (Redis, ClickHouse) are reachable.
 3. Run smoke tests: `make smoke`.
 
@@ -139,10 +139,10 @@ Secrets such as `ACCESS_JWT_SECRET_KEY`, `ACCESS_API_*`, and Keycloak client cre
 ### Streaming Connection Flapping
 - Review metrics `streaming_active_connections` and `streaming_send_errors`.
 - Confirm Kafka lag manageable; run `kafka-consumer-groups --describe`.
-- Restart streaming pods (`kubectl rollout restart deployment/streaming -n access`) to clear sessions.
+- Restart streaming pods (`kubectl rollout restart deployment/streaming -n 254carbon-access`) to clear sessions.
 
 ### Metrics Dashboard Empty
-- `kubectl logs deployment/metrics -n access` to confirm ingestion healthy.
+- `kubectl logs deployment/metrics -n 254carbon-access` to confirm ingestion healthy.
 - Validate Prometheus targets (`/prometheus/targets?search=254carbon-access`).
 - Ensure `ACCESS_METRICS_SERVICE_URL` set for gateway/streaming deployments.
 
