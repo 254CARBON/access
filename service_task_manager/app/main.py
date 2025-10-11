@@ -8,15 +8,16 @@ import os
 import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Any, Deque, Dict, List, Optional, Sequence
 from enum import Enum
+from time import perf_counter
+from typing import Any, Deque, Dict, List, Optional, Sequence
 
 # Add shared directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import structlog
@@ -25,6 +26,7 @@ from shared.config import BaseConfig
 from shared.logging import get_logger
 from shared.metrics import MetricsCollector
 from shared.observability import get_observability_manager
+from shared.tracing import get_w3c_trace_context
 
 try:  # pragma: no cover - allow running tests without auth dependency
     from shared.auth import JWKSAuthenticator
@@ -739,14 +741,62 @@ class TaskManagerService:
 
     def _setup_middleware(self):
         """Set up middleware."""
-        
         @self.app.middleware("http")
-        async def add_process_time_header(request, call_next):
-            start_time = datetime.now()
-            response = await call_next(request)
-            process_time = (datetime.now() - start_time).total_seconds()
-            response.headers["X-Process-Time"] = str(process_time)
-            return response
+        async def observability_middleware(request: Request, call_next):
+            start_time = perf_counter()
+
+            inbound_request_id = (
+                request.headers.get("x-request-id")
+                or request.headers.get("x-correlation-id")
+            )
+            user_id = request.headers.get("x-user-id")
+            tenant_id = request.headers.get("x-tenant-id")
+
+            request_id = self.observability.set_request_id(inbound_request_id)
+            self.observability.trace_request(
+                request_id=request_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
+
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                duration = perf_counter() - start_time
+                self.observability.log_error(
+                    "unhandled_exception",
+                    str(exc),
+                    method=request.method,
+                    endpoint=request.url.path,
+                    duration=duration,
+                    tenant_id=tenant_id,
+                )
+                raise
+            else:
+                duration = perf_counter() - start_time
+                self.observability.log_request(
+                    request.method,
+                    request.url.path,
+                    response.status_code,
+                    duration,
+                    tenant_id=tenant_id,
+                )
+
+                response.headers["X-Process-Time"] = f"{duration:.6f}"
+                response.headers["X-Request-Id"] = request_id
+
+                trace_context = get_w3c_trace_context()
+                if trace_context:
+                    traceparent = trace_context.get("traceparent")
+                    if traceparent:
+                        response.headers["traceparent"] = traceparent
+                    tracestate = trace_context.get("tracestate")
+                    if tracestate:
+                        response.headers["tracestate"] = tracestate
+
+                return response
+            finally:
+                self.observability.clear_request_context()
 
     async def _authenticate(self) -> Dict[str, Any]:
         """Authentication dependency."""

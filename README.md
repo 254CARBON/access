@@ -116,10 +116,11 @@ Secrets such as `ACCESS_JWT_SECRET_KEY`, `ACCESS_API_*`, and Keycloak client cre
 
 ## Observability
 - Metrics exposed via `/metrics` on each service; Prometheus targets configured in `k8s/monitoring/`.
-- Grafana dashboards stored at `../observability/dashboards/access/gateway_overview.json` and `../observability/dashboards/access/gateway_served_cache.json`.
-- Alerts managed in `../observability/alerts/RED/gateway_red.yaml` and `../observability/alerts/SLO/api_latency_slo.yaml`.
+- Grafana dashboards stored at `../observability/dashboards/access/gateway_overview.json`, `../observability/dashboards/access/gateway_served_cache.json`, and `../observability/dashboards/access/task_manager_overview.json`.
+- Alerts managed in `../observability/alerts/RED/gateway_red.yaml`, `../observability/alerts/RED/task_manager_red.yaml`, and `../observability/alerts/SLO/api_latency_slo.yaml`.
 - Logs are structured JSON (stdout). Access with `kubectl logs -l app=gateway -n 254carbon-access`. Loki integration is pending.
 - Traces tagged with `service.name=254carbon-gateway` / `254carbon-streaming`; view in Tempo/Jaeger filtered by `client.address`.
+- Task Manager middleware now injects `X-Request-Id`, `traceparent`, and `tracestate` headers on HTTP responses to simplify downstream trace correlation.
 - Key metrics for served performance: `gateway_served_cache_warm_total`, `gateway_served_cache_warm_duration_seconds`, and `gateway_served_projection_age_seconds`.
 
 ---

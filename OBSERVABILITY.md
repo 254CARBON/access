@@ -6,9 +6,9 @@ This document provides comprehensive guidance on the observability features impl
 
 The Access Layer implements a comprehensive observability stack including:
 
-- **Structured Logging**: JSON-formatted logs with correlation IDs
+- **Structured Logging**: JSON-formatted logs with correlation IDs and trace identifiers
 - **Metrics Collection**: Prometheus-compatible metrics with business event tracking
-- **Distributed Tracing**: OpenTelemetry-based tracing with Jaeger integration
+- **Distributed Tracing**: OpenTelemetry-based tracing with Tempo (Jaeger-compatible UI)
 - **Health Monitoring**: Service health checks and dependency monitoring
 
 ## Architecture
@@ -20,7 +20,7 @@ The Access Layer implements a comprehensive observability stack including:
 │                 │    │                 │    │                 │
 │ • Gateway       │    │ • Logging       │    │ • Prometheus    │
 │ • Auth          │    │ • Metrics       │    │ • Grafana       │
-│ • Streaming     │    │ • Tracing      │    │ • Jaeger        │
+│ • Streaming     │    │ • Tracing      │    │ • Tempo/Jaeger  │
 │ • Entitlements  │    │                 │    │                 │
 │ • Metrics       │    │                 │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
@@ -102,15 +102,15 @@ with observability.measure_operation("database_query"):
 - OpenTelemetry integration
 - Automatic instrumentation for FastAPI, Redis, SQLAlchemy, HTTPX, Kafka
 - Custom span creation
-- Trace context propagation
-- Jaeger visualization
+- Trace context propagation (headers + logging context)
+- Tempo / Jaeger visualization
 
 **Configuration:**
-```python
+```bash
 # Environment variables
-OTEL_EXPORTER=http://jaeger:14268/api/traces
-ENABLE_CONSOLE_TRACING=true
-TRACE_SAMPLING_RATE=1.0
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+export ENABLE_CONSOLE_TRACING=true
+export TRACE_SAMPLING_RATE=1.0
 ```
 
 **Usage:**
@@ -124,6 +124,19 @@ async def my_function():
 with observe_operation("database_query", query="SELECT * FROM users"):
     result = await database.execute()
 ```
+
+### Trace Context Propagation
+- FastAPI middleware (gateway, Task Manager, auth, entitlements) automatically sets `X-Request-Id`, `traceparent`, and `tracestate` on every response.
+- Forward incoming headers to downstream calls or background jobs:
+  ```python
+  outbound_headers = {
+      key: value
+      for key, value in request.headers.items()
+      if key.lower() in {"traceparent", "tracestate", "x-request-id"}
+  }
+  await httpx_client.post(url, headers=outbound_headers, json=payload)
+  ```
+- Structured logs emitted via `shared.logging` include `trace_id` / `span_id` automatically whenever tracing is enabled.
 
 ## Service Integration
 
@@ -141,6 +154,23 @@ with observe_operation("database_query", query="SELECT * FROM users"):
 - `gateway_cache_hits_total`
 - `gateway_rate_limit_violations_total`
 - `gateway_auth_events_total`
+
+### Task Manager Service
+
+**Observability Features:**
+- RED instrumentation via `shared.observability` with automatic metrics & tracing.
+- Response headers supply `X-Request-Id`, `traceparent`, and `tracestate` for downstream correlation.
+- Business event counters highlight workflow state transitions.
+
+**Key Metrics:**
+- `task_manager:http_requests:rate5m`
+- `task_manager:http_error_rate:ratio5m`
+- `task_manager:http_request_duration_seconds:p95`
+- `task_manager:errors:rate5m`
+
+**Dashboards & Alerts:**
+- Grafana: `../observability/dashboards/access/task_manager_overview.json`
+- Prometheus rules: `../observability/alerts/RED/task_manager_red.yaml`
 
 ### Auth Service
 
@@ -227,7 +257,7 @@ scrape_configs:
 **Access:** http://localhost:3000
 **Default Credentials:** admin/admin
 
-### Jaeger
+### Tempo / Jaeger UI
 
 **Features:**
 - Distributed trace visualization
@@ -235,7 +265,7 @@ scrape_configs:
 - Performance analysis
 - Error tracking
 
-**Access:** http://localhost:16686
+**Access:** http://localhost:16686 (Tempo Jaeger UI)
 
 ## Configuration
 
@@ -254,7 +284,7 @@ METRICS_PATH=/metrics
 
 # Tracing
 ENABLE_TRACING=true
-OTEL_EXPORTER=http://jaeger:14268/api/traces
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ENABLE_CONSOLE_TRACING=false
 TRACE_SAMPLING_RATE=1.0
 
@@ -312,8 +342,8 @@ services:
 ### Common Issues
 
 1. **Missing Traces**
-   - Check OTEL_EXPORTER configuration
-   - Verify Jaeger is running and accessible
+   - Check `OTEL_EXPORTER_OTLP_ENDPOINT` configuration
+   - Verify Tempo/Jaeger UI is running and accessible
    - Check trace sampling rate
 
 2. **Missing Metrics**
@@ -338,7 +368,7 @@ curl http://localhost:8000/metrics
 # Check Prometheus targets
 curl http://localhost:9090/api/v1/targets
 
-# View Jaeger services
+# View Tempo services
 curl http://localhost:16686/api/services
 ```
 
