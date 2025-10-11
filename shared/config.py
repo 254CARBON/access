@@ -85,6 +85,13 @@ class BaseConfig(BaseSettings):
     # Rate limiting
     rate_limits_file: Optional[str] = Field(default=None, env="ACCESS_RATE_LIMITS_FILE")
     
+    # Reporting configuration
+    reports_artifact_bucket: str = Field(default="reports", env="ACCESS_REPORTS_ARTIFACT_BUCKET")
+    reports_artifact_region: str = Field(default="us-west-1", env="ACCESS_REPORTS_ARTIFACT_REGION")
+    minio_url: str = Field(default="http://minio:9000", env="ACCESS_MINIO_URL")
+    minio_access_key: str = Field(default="minioadmin", env="ACCESS_MINIO_ACCESS_KEY")
+    minio_secret_key: str = Field(default="minioadmin", env="ACCESS_MINIO_SECRET_KEY")
+    
     # TLS (future)
     tls_enabled: bool = Field(default=False, env="ACCESS_TLS_ENABLED")
     if 'SettingsConfigDict' not in globals():  # pragma: no cover - legacy pydantic v1 path

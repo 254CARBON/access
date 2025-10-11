@@ -2,6 +2,7 @@
 Tests for Gateway service.
 """
 
+import types
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock
@@ -10,6 +11,47 @@ import os
 
 # Add service directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'service_gateway', 'app'))
+
+
+# Provide lightweight stubs for optional scenario clients used by the gateway during tests.
+scenario_pkg = types.ModuleType("scenario")
+sys.modules.setdefault("scenario", scenario_pkg)
+
+scenario_der = types.ModuleType("scenario.der_client")
+
+
+class _StubDERServiceClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+scenario_der.DERServiceClient = _StubDERServiceClient
+sys.modules["scenario.der_client"] = scenario_der
+scenario_pkg.der_client = scenario_der
+
+scenario_exceptions = types.ModuleType("scenario.exceptions")
+
+
+class _ScenarioServiceError(Exception):
+    pass
+
+
+scenario_exceptions.ScenarioServiceError = _ScenarioServiceError
+sys.modules["scenario.exceptions"] = scenario_exceptions
+scenario_pkg.exceptions = scenario_exceptions
+
+scenario_irp = types.ModuleType("scenario.irp_client")
+
+
+class _StubIRPCaseClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+scenario_irp.IRPCaseClient = _StubIRPCaseClient
+sys.modules["scenario.irp_client"] = scenario_irp
+scenario_pkg.irp_client = scenario_irp
 
 from service_gateway.app.main import create_app
 
@@ -53,6 +95,32 @@ def test_metrics_endpoint(client):
     response = client.get("/metrics")
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
+
+
+def test_routes_metadata_endpoint(client):
+    """Gateway exposes route metadata catalog."""
+    service = client.app.state.gateway_service
+    service.auth_middleware.authenticate_request = AsyncMock(return_value=_mock_user_context())
+
+    response = client.get(
+        "/api/v1/metadata/routes",
+        headers={"Authorization": "Bearer token"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] > 0
+    assert any(route["path"] == "/api/v1/status" for route in payload["routes"])
+
+
+def test_cache_catalog_endpoint(client):
+    """Gateway exposes cache catalog metadata."""
+    response = client.get("/api/v1/cache/catalog")
+    assert response.status_code == 200
+    data = response.json()
+    catalog = data["cache_catalog"]
+    assert "served_latest_price" in catalog
+    assert "default_ttl_seconds" in catalog["served_latest_price"]
 
 
 def _mock_rate_limit_ok():

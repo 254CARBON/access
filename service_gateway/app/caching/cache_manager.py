@@ -63,6 +63,23 @@ class CacheManager:
             "served_curve_snapshot": "served_curve_snapshot",
             "served_custom": "served_custom"
         }
+        self._ttl_defaults: Dict[str, int] = {
+            "served_latest_price": DEFAULT_LATEST_PRICE_TTL,
+            "served_curve_snapshot": DEFAULT_CURVE_SNAPSHOT_TTL,
+            "served_custom": DEFAULT_CUSTOM_TTL,
+        }
+        self._cache_descriptions: Dict[str, str] = {
+            "instruments": "Instrument catalog filtered per user and tenant.",
+            "curves": "Curve configuration snapshots per tenant.",
+            "products": "Commercial product catalog lookups.",
+            "pricing": "Pricing sheet and valuation payloads.",
+            "historical": "Historical tick batches for replay endpoints.",
+            "user_context": "Authenticated user context and entitlement decisions.",
+            "rate_limit": "Distributed token bucket counters per client/endpoint.",
+            "served_latest_price": "Served data service latest price projections.",
+            "served_curve_snapshot": "Served data service curve snapshots by horizon.",
+            "served_custom": "Custom served projections (e.g., vol surfaces).",
+        }
 
     async def _safe_get(self, prefix: str, *args) -> Optional[Any]:
         """Safely get cached data, handling errors."""
@@ -362,6 +379,7 @@ class CacheManager:
             stats.setdefault("cache_types", list(self.CACHE_PREFIXES.keys()))
             stats.setdefault("warm_cache_available", hasattr(self.adaptive_cache, "warm_cache"))
             stats.setdefault("hot_query_categories", self.hot_query_loader.categories())
+            stats.setdefault("cache_catalog", self.cache_catalog())
             return stats
 
         except Exception as e:
@@ -371,7 +389,24 @@ class CacheManager:
                 "cache_types": list(self.CACHE_PREFIXES.keys()),
                 "warm_cache_available": hasattr(self.adaptive_cache, "warm_cache"),
                 "hot_query_categories": self.hot_query_loader.categories(),
+                "cache_catalog": self.cache_catalog(),
             }
+
+    def cache_catalog(self) -> Dict[str, Dict[str, Any]]:
+        """Return metadata describing each logical cache bucket."""
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for logical_name, redis_prefix in self.CACHE_PREFIXES.items():
+            entry: Dict[str, Any] = {
+                "redis_prefix": redis_prefix,
+                "description": self._cache_descriptions.get(logical_name, ""),
+                "default_ttl_seconds": self._ttl_defaults.get(logical_name, self.adaptive_cache.base_ttl),
+                "adaptive": True,
+            }
+            if logical_name.startswith("served_"):
+                entry["warmable"] = True
+                entry["hot_query_category"] = logical_name.replace("served_", "")
+            catalog[logical_name] = entry
+        return catalog
 
     async def get_products(self, user_id: str, tenant_id: str) -> Optional[List[Dict[str, Any]]]:
         """Get cached products for user."""

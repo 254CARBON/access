@@ -10,3 +10,19 @@ Entitlements, Metrics). These adapters encapsulate:
 
 Keep adapters thin and side-effect free outside of explicit calls.
 """
+
+from .auth_client import AuthClient
+from .entitlements_client import EntitlementsClient
+from .served_data_client import ServedDataClient
+from .clickhouse_client import ClickHouseClient
+from .report_template_store import ReportTemplateStore
+from .figure_factory import FigureFactory
+
+__all__ = [
+    "AuthClient",
+    "EntitlementsClient",
+    "ServedDataClient",
+    "ClickHouseClient",
+    "ReportTemplateStore",
+    "FigureFactory",
+]

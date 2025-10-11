@@ -6,6 +6,7 @@ import sys
 import os
 import time
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -27,10 +28,17 @@ from caching.cache_manager import CacheManager
 from ratelimit.token_bucket import TokenBucketRateLimiter, RateLimitMiddleware
 from shared.circuit_breaker import circuit_breaker_manager
 from fastapi import Depends, HTTPException, Request, Header, Query, Response
+from fastapi.routing import APIRoute
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from auth import JWKSAuthenticator
 from market_data import MarketDataService
+from adapters.report_template_store import ReportTemplateStore
+from adapters.figure_factory import FigureFactory
+from domain.reporting import ReportGenerationService
+from scenario.der_client import DERServiceClient
+from scenario.exceptions import ScenarioServiceError
+from scenario.irp_client import IRPCaseClient
 
 
 class GatewayService(BaseService):
@@ -76,6 +84,23 @@ class GatewayService(BaseService):
             self.clickhouse_client,
             cache_ttl_seconds=cache_ttl,
         )
+
+        # Scenario services clients
+        self.irp_client = IRPCaseClient(self.config.irp_service_url)
+        self.der_client = DERServiceClient(self.config.der_service_url)
+        
+        # Initialize reporting components
+        self.report_template_store = ReportTemplateStore(self.clickhouse_client)
+        self.figure_factory = FigureFactory(self.clickhouse_client)
+        self.reporting_service = ReportGenerationService(
+            template_store=self.report_template_store,
+            figure_factory=self.figure_factory,
+            irp_client=self.irp_client,
+            artifact_bucket=self.config.reports_artifact_bucket,
+            storage_region=self.config.reports_artifact_region,
+            minio_endpoint=self.config.minio_url,
+            metrics=self.metrics,
+        )
         
         # Initialize observability
         otel_exporter = self.config.otel_exporter if self.config.enable_tracing else None
@@ -97,16 +122,22 @@ class GatewayService(BaseService):
         @self.app.on_event("startup")
         async def _startup():
             await self.jwks_authenticator.warmup()
+            if self.reporting_service:
+                await self.reporting_service.start_workers()
 
         @self.app.on_event("shutdown")
         async def _shutdown():
             await self.market_data_service.close()
             await self.jwks_authenticator.close()
             await self.clickhouse_client.close()
+            if self.reporting_service:
+                await self.reporting_service.stop_workers()
 
         self._setup_gateway_routes()
         self._setup_north_america_routes()
         self._setup_observability_middleware()
+        self._setup_reporting_routes()
+        self._setup_task_manager_routes()
 
         # Expose service instance via app state for introspection/testing
         self.app.state.gateway_service = self
@@ -383,6 +414,39 @@ class GatewayService(BaseService):
                     "metrics": "ok"
                 }
             }
+
+        @self.app.get("/api/v1/metadata/routes")
+        async def list_gateway_routes(request: Request):
+            """Return metadata for registered API routes."""
+            user_info = await self.auth_middleware.authenticate_request(request)
+
+            routes_payload = []
+            for route in self.app.router.routes:
+                if not isinstance(route, APIRoute):
+                    continue
+                if route.path.startswith("/openapi") or route.path.startswith("/docs"):
+                    continue
+                methods = sorted(m for m in (route.methods or set()) if m not in {"HEAD", "OPTIONS"})
+                routes_payload.append(
+                    {
+                        "path": route.path,
+                        "methods": methods,
+                        "name": route.name,
+                        "summary": route.summary,
+                        "tags": list(route.tags or []),
+                    }
+                )
+
+            routes_payload.sort(key=lambda item: item["path"])
+            return {
+                "count": len(routes_payload),
+                "routes": routes_payload,
+                "generated_at": self._format_iso(datetime.now(timezone.utc)),
+                "user": {
+                    "user_id": user_info.get("user_id"),
+                    "tenant_id": user_info.get("tenant_id"),
+                },
+            }
         
         @self.app.get("/api/v1/instruments")
         @observe_function("gateway_get_instruments")
@@ -572,6 +636,20 @@ class GatewayService(BaseService):
             except Exception as e:
                 self.logger.error("Cache stats error", error=str(e))
                 return {"error": str(e)}
+
+        @self.app.get("/api/v1/cache/catalog")
+        async def get_cache_catalog():
+            """Expose cache catalog metadata and default TTLs."""
+            try:
+                catalog = self.cache_manager.cache_catalog()
+                return {
+                    "cache_catalog": catalog,
+                    "generated_at": self._format_iso(datetime.now(timezone.utc)),
+                    "hot_query_categories": self.cache_manager.hot_query_loader.categories(),
+                }
+            except Exception as exc:
+                self.logger.error("Cache catalog error", error=str(exc))
+                return {"error": str(exc)}
 
         @self.app.get("/api/v1/instruments/fallback")
         async def get_instruments_fallback():
@@ -1189,16 +1267,13 @@ class GatewayService(BaseService):
             )
 
             # Forward to IRP service
-            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
-            case_response = await self._forward_request(
-                f"{irp_service_url}/cases",
-                "POST",
-                body,
-                auth_info["token"]
-            )
+            case_response = await self.irp_client.create_case(body, auth_token=auth_info["token"])
 
             return case_response
 
+        except ScenarioServiceError as exc:
+            self.logger.error("IRP case creation error", error=str(exc))
+            raise self._convert_scenario_error(exc) from exc
         except Exception as e:
             self.logger.error("IRP case creation error", error=str(e))
             if isinstance(e, HTTPException):
@@ -1223,26 +1298,17 @@ class GatewayService(BaseService):
             status = request.query_params.get("status")
 
             # Forward to IRP service
-            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
-            url = f"{irp_service_url}/cases"
-            if market or status:
-                url += "?"
-                params = []
-                if market:
-                    params.append(f"market={market}")
-                if status:
-                    params.append(f"status={status}")
-                url += "&".join(params)
-
-            cases_response = await self._forward_request(
-                url,
-                "GET",
-                None,
-                auth_info["token"]
+            cases_response = await self.irp_client.list_cases(
+                market=market,
+                status=status,
+                auth_token=auth_info["token"],
             )
 
             return cases_response
 
+        except ScenarioServiceError as exc:
+            self.logger.error("IRP cases listing error", error=str(exc))
+            raise self._convert_scenario_error(exc) from exc
         except Exception as e:
             self.logger.error("IRP cases listing error", error=str(e))
             if isinstance(e, HTTPException):
@@ -1263,16 +1329,13 @@ class GatewayService(BaseService):
             )
 
             # Forward to IRP service
-            irp_service_url = self.config.irp_service_url or "http://service-irpcore:8000"
-            case_response = await self._forward_request(
-                f"{irp_service_url}/cases/{case_id}",
-                "GET",
-                None,
-                auth_info["token"]
-            )
+            case_response = await self.irp_client.get_case(case_id, auth_token=auth_info["token"])
 
             return case_response
 
+        except ScenarioServiceError as exc:
+            self.logger.error("IRP case retrieval error", error=str(exc))
+            raise self._convert_scenario_error(exc) from exc
         except Exception as e:
             self.logger.error("IRP case retrieval error", error=str(e))
             if isinstance(e, HTTPException):
@@ -1359,16 +1422,13 @@ class GatewayService(BaseService):
             )
 
             # Forward to DER service
-            der_service_url = self.config.der_service_url or "http://service-der:8000"
-            der_response = await self._forward_request(
-                f"{der_service_url}/programs/analyze",
-                "POST",
-                body,
-                auth_info["token"]
-            )
+            der_response = await self.der_client.analyze_program(body, auth_token=auth_info["token"])
 
             return der_response
 
+        except ScenarioServiceError as exc:
+            self.logger.error("DER program analysis error", error=str(exc))
+            raise self._convert_scenario_error(exc) from exc
         except Exception as e:
             self.logger.error("DER program analysis error", error=str(e))
             if isinstance(e, HTTPException):
@@ -1528,6 +1588,16 @@ class GatewayService(BaseService):
                 )
 
             return response.json()
+    
+    def _convert_scenario_error(self, exc: ScenarioServiceError) -> HTTPException:
+        """Translate Scenario Platform errors into HTTP responses."""
+        status = exc.status_code or 502
+        detail: Dict[str, Any] = {"error": str(exc)}
+        if isinstance(exc.payload, (dict, list)):
+            detail["payload"] = exc.payload
+        elif exc.payload is not None:
+            detail["payload"] = str(exc.payload)
+        return HTTPException(status_code=status, detail=detail)
 
     async def _check_dependencies(self):
         """Check gateway dependencies."""
@@ -1540,6 +1610,290 @@ class GatewayService(BaseService):
         # Rate limiter shares Redis, reuse status to avoid duplicate checks
         dependencies["rate_limit_store"] = dependencies["redis"]
         return dependencies
+
+    def _setup_reporting_routes(self):
+        """Set up reporting routes."""
+
+        @self.app.get("/reports/templates")
+        async def list_report_templates(report_type: Optional[str] = Query(None), jurisdiction: Optional[str] = Query(None)):
+            templates = await self.reporting_service.list_templates(report_type=report_type, jurisdiction=jurisdiction)
+            return {"templates": templates}
+
+        @self.app.post("/reports/generate")
+        async def generate_report(request: Request, report_request: Dict[str, Any]):
+            subject = request.headers.get("x-subject", "anonymous")
+            rate_result = await self._enforce_rate_limit(request, subject, "/reports/generate")
+            try:
+                report_id = await self.reporting_service.enqueue_report(report_request, subject)
+                response = {"report_id": report_id, "status": "queued"}
+                return Response(content=json.dumps(response), media_type="application/json", status_code=202)
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.get("/reports/{report_id}")
+        async def get_report_status(report_id: str):
+            status = await self.reporting_service.get_report_status(report_id)
+            if status is None:
+                raise HTTPException(status_code=404, detail={"error": "Report not found"})
+            return status
+
+        @self.app.get("/reports/{report_id}/download")
+        async def download_report(report_id: str):
+            download_info = await self.reporting_service.get_download_url(report_id)
+            if download_info is None:
+                raise HTTPException(status_code=404, detail={"error": "Report not available"})
+            return download_info
+
+    def _setup_task_manager_routes(self):
+        """Set up task manager routes."""
+        tasks_service_url = self.config.tasks_service_url
+
+        @self.app.post("/rftps")
+        async def create_rftp(request: Request, rftp_data: Dict[str, Any]):
+            """Create a new Request for Task Proposal."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/rftps")
+            try:
+                body = rftp_data
+                body["requested_by"] = subject
+                
+                rftp_response = await self._forward_request(
+                    f"{tasks_service_url}/rftps",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return rftp_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.get("/rftps/{rftp_id}")
+        async def get_rftp(rftp_id: str, request: Request):
+            """Get RFTP by ID."""
+            auth_info = await self._authenticate_request(request)
+            
+            rftp_response = await self._forward_request(
+                f"{tasks_service_url}/rftps/{rftp_id}",
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return rftp_response
+
+        @self.app.get("/rftps")
+        async def list_rftps(
+            request: Request,
+            status: Optional[str] = Query(None),
+            task_type: Optional[str] = Query(None)
+        ):
+            """List RFTPs with optional filters."""
+            auth_info = await self._authenticate_request(request)
+            
+            params = {}
+            if status:
+                params["status"] = status
+            if task_type:
+                params["task_type"] = task_type
+            
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            url = f"{tasks_service_url}/rftps"
+            if query_string:
+                url += f"?{query_string}"
+            
+            rftp_response = await self._forward_request(
+                url,
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return rftp_response
+
+        @self.app.post("/proposals")
+        async def create_proposal(request: Request, proposal_data: Dict[str, Any]):
+            """Create a task proposal."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/proposals")
+            try:
+                body = proposal_data
+                body["created_by"] = subject
+                
+                proposal_response = await self._forward_request(
+                    f"{tasks_service_url}/proposals",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return proposal_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.get("/proposals/{proposal_id}")
+        async def get_proposal(proposal_id: str, request: Request):
+            """Get proposal by ID."""
+            auth_info = await self._authenticate_request(request)
+            
+            proposal_response = await self._forward_request(
+                f"{tasks_service_url}/proposals/{proposal_id}",
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return proposal_response
+
+        @self.app.get("/tasks")
+        async def list_tasks(
+            request: Request,
+            status: Optional[str] = Query(None),
+            task_type: Optional[str] = Query(None),
+            assigned_to: Optional[str] = Query(None)
+        ):
+            """List tasks with optional filters."""
+            auth_info = await self._authenticate_request(request)
+            
+            params = {}
+            if status:
+                params["status"] = status
+            if task_type:
+                params["task_type"] = task_type
+            if assigned_to:
+                params["assigned_to"] = assigned_to
+            
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            url = f"{tasks_service_url}/tasks"
+            if query_string:
+                url += f"?{query_string}"
+            
+            tasks_response = await self._forward_request(
+                url,
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return tasks_response
+
+        @self.app.get("/tasks/{task_id}")
+        async def get_task(task_id: str, request: Request):
+            """Get task by ID."""
+            auth_info = await self._authenticate_request(request)
+            
+            task_response = await self._forward_request(
+                f"{tasks_service_url}/tasks/{task_id}",
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return task_response
+
+        @self.app.post("/tasks/{task_id}/approve")
+        async def approve_task(task_id: str, request: Request, approval_data: Dict[str, Any]):
+            """Approve a task."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/tasks/approve")
+            try:
+                body = approval_data
+                body["approved_by"] = subject
+                
+                approval_response = await self._forward_request(
+                    f"{tasks_service_url}/tasks/{task_id}/approve",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return approval_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.post("/tasks/{task_id}/start")
+        async def start_task(task_id: str, request: Request, start_data: Dict[str, Any]):
+            """Start a task."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/tasks/start")
+            try:
+                body = start_data
+                body["assigned_to"] = subject
+                
+                start_response = await self._forward_request(
+                    f"{tasks_service_url}/tasks/{task_id}/start",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return start_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.post("/tasks/{task_id}/complete")
+        async def complete_task(task_id: str, request: Request, completion_data: Dict[str, Any]):
+            """Complete a task."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/tasks/complete")
+            try:
+                body = completion_data
+                
+                completion_response = await self._forward_request(
+                    f"{tasks_service_url}/tasks/{task_id}/complete",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return completion_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.post("/tasks/{task_id}/progress")
+        async def update_progress(task_id: str, request: Request, progress_data: Dict[str, Any]):
+            """Update task progress."""
+            auth_info = await self._authenticate_request(request)
+            subject = auth_info["subject"]
+            
+            rate_result = await self._enforce_rate_limit(request, subject, "/tasks/progress")
+            try:
+                body = progress_data
+                
+                progress_response = await self._forward_request(
+                    f"{tasks_service_url}/tasks/{task_id}/progress",
+                    "POST",
+                    body,
+                    auth_info["token"]
+                )
+                
+                return progress_response
+            finally:
+                self._set_rate_limit_headers(Response(), rate_result)
+
+        @self.app.get("/telemetry/dashboard")
+        async def get_dashboard_data(request: Request):
+            """Get dashboard telemetry data."""
+            auth_info = await self._authenticate_request(request)
+            
+            dashboard_response = await self._forward_request(
+                f"{tasks_service_url}/telemetry/dashboard",
+                "GET",
+                None,
+                auth_info["token"]
+            )
+            
+            return dashboard_response
 
 
 def create_app():
