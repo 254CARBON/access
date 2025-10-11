@@ -51,6 +51,7 @@ class BaseConfig(BaseSettings):
     entitlements_service_url: str = Field(default="http://localhost:8011", env="ACCESS_ENTITLEMENTS_SERVICE_URL")
     metrics_service_url: str = Field(default="http://localhost:8012", env="ACCESS_METRICS_SERVICE_URL")
     projection_service_url: str = Field(default="http://localhost:8085", env="ACCESS_PROJECTION_SERVICE_URL")
+    search_service_url: str = Field(default="http://localhost:9007", env="ACCESS_SEARCH_SERVICE_URL")
 
     # North America market services
     irp_service_url: str = Field(default="http://service-irpcore:8000", env="ACCESS_IRP_SERVICE_URL")
@@ -64,7 +65,7 @@ class BaseConfig(BaseSettings):
     
     # Observability
     enable_tracing: bool = Field(default=False, env="ACCESS_ENABLE_TRACING")
-    otel_exporter: str = Field(default="http://localhost:4318", env="ACCESS_OTEL_EXPORTER")
+    otel_exporter: str = Field(default="http://otel-collector:4317", env="ACCESS_OTEL_EXPORTER")
     enable_console_tracing: bool = Field(default=False, env="ACCESS_ENABLE_CONSOLE_TRACING")
 
     # Streaming service

@@ -20,3 +20,11 @@ sla:
   p95_latency_ms: 250
   availability: "99.0%"
 owner: platform
+performance:
+  targets:
+    - name: control_plane_p95_latency
+      metric: http_req_duration
+      threshold_ms: 250
+      runner: k6
+      script: access/performance/k6/streaming_latency_smoke.js
+      description: Streaming control-plane smoke test enforcing 250ms p95

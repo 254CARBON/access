@@ -184,6 +184,105 @@ class GatewayService(BaseService):
                 "tenant": user_info["tenant_id"]
             }
 
+        @self.app.post("/api/v1/search")
+        async def search(request: Request):
+            """Proxy search requests to the ML search service with auth context."""
+            rate_limit_result = await self.rate_limit_middleware.check_request(request, "authenticated")
+            if not rate_limit_result["allowed"]:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Rate limit exceeded",
+                        "current_count": rate_limit_result["current_count"],
+                        "limit": rate_limit_result["limit"],
+                        "reset_in_seconds": rate_limit_result["reset_in_seconds"]
+                    }
+                )
+
+            try:
+                payload = await request.json()
+            except Exception as exc:
+                self.logger.warning("Invalid search payload", error=str(exc))
+                raise HTTPException(status_code=400, detail="Invalid JSON payload")
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="Search payload must be a JSON object")
+
+            try:
+                user_info = await self.auth_middleware.process_request(
+                    request, "read", "search"
+                )
+            except Exception as e:
+                self.logger.error("Auth middleware error", error=str(e))
+                raise
+
+            forward_headers = {
+                "X-User-Id": user_info["user_id"],
+                "X-Tenant-Id": user_info["tenant_id"],
+                "X-User-Roles": ",".join(user_info.get("roles", []))
+            }
+            auth_header = request.headers.get("Authorization")
+            if auth_header:
+                forward_headers["Authorization"] = auth_header
+            api_key = request.headers.get("X-API-Key")
+            if api_key:
+                forward_headers["X-API-Key"] = api_key
+            entitlements = user_info.get("entitlements")
+            if entitlements:
+                forward_headers["X-Entitlements"] = ",".join(sorted(entitlements))
+
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        f"{self.config.search_service_url}/api/v1/search",
+                        json=payload,
+                        params={"tenant_id": user_info.get("tenant_id", "default")},
+                        headers=forward_headers
+                    )
+            except httpx.HTTPError as exc:
+                self.logger.error("Search service request failed", error=str(exc))
+                raise HTTPException(status_code=503, detail="Search service unavailable")
+
+            if response.status_code >= 500:
+                self.logger.error(
+                    "Search service error",
+                    status_code=response.status_code,
+                    body=response.text[:500]
+                )
+                raise HTTPException(status_code=502, detail="Search service error")
+            if response.status_code >= 400:
+                self.logger.warning(
+                    "Search service client error",
+                    status_code=response.status_code,
+                    body=response.text[:500]
+                )
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    error_payload = {"error": "Search service client error"}
+                raise HTTPException(status_code=response.status_code, detail=error_payload)
+
+            try:
+                result = response.json()
+            except ValueError:
+                self.logger.error("Search service returned non-JSON payload", body=response.text[:500])
+                raise HTTPException(status_code=502, detail="Invalid response from search service")
+
+            augmented_result = dict(result)
+            augmented_result["user"] = user_info["user_id"]
+            augmented_result["tenant"] = user_info["tenant_id"]
+            augmented_result["cached"] = False
+
+            self.logger.info(
+                "Search request proxied",
+                user_id=user_info["user_id"],
+                tenant_id=user_info["tenant_id"],
+                semantic=bool(payload.get("semantic", True)),
+                limit=payload.get("limit", 10)
+            )
+
+            return augmented_result
+
         @self.app.post("/api/v1/cache/warm")
         async def warm_cache(request: Request):
             """Warm cache for user (admin endpoint)."""

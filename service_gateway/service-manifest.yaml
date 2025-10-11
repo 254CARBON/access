@@ -18,3 +18,11 @@ sla:
   p95_latency_ms: 150
   availability: "99.0%"
 owner: platform
+performance:
+  targets:
+    - name: http_p95_latency
+      metric: http_req_duration
+      threshold_ms: 150
+      runner: k6
+      script: access/performance/k6/gateway_latency_smoke.js
+      description: Gateway program metrics smoke test enforcing 150ms p95

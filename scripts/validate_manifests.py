@@ -103,7 +103,34 @@ def validate_manifest(manifest_path: Path) -> List[str]:
         owner = manifest['owner']
         if owner != 'platform':
             errors.append("owner must be 'platform'")
-    
+
+    # Validate performance targets
+    if 'performance' in manifest:
+        performance = manifest['performance']
+        if not isinstance(performance, dict):
+            errors.append("performance must be a dictionary")
+        else:
+            targets = performance.get('targets')
+            if not isinstance(targets, list) or not targets:
+                errors.append("performance.targets must be a non-empty list")
+            else:
+                required_target_fields = {'name', 'metric', 'threshold_ms', 'runner', 'script'}
+                for idx, target in enumerate(targets):
+                    if not isinstance(target, dict):
+                        errors.append(f"performance.targets[{idx}] must be an object")
+                        continue
+                    missing = required_target_fields - target.keys()
+                    if missing:
+                        errors.append(
+                            f"performance.targets[{idx}] missing required fields: {sorted(missing)}"
+                        )
+                    else:
+                        threshold = target.get('threshold_ms')
+                        if not isinstance(threshold, (int, float)):
+                            errors.append(
+                                f"performance.targets[{idx}].threshold_ms must be numeric"
+                            )
+
     return errors
 
 def main():
